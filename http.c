@@ -392,3 +392,14 @@ http_write(void *buf_head, size_t buf_size,
   fprintf(stderr, "handled_buf\n");
   return (uint8_t *)buf - (uint8_t *)buf_head;
 }
+
+void
+http_terminate(void *ptr)
+{
+  http_context_t *context = (http_context_t *)ptr;
+
+  if (context->read_fd != -1)
+    close(context->read_fd);
+
+  free(context);
+}

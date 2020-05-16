@@ -205,6 +205,7 @@ main(int argc, char *argv[])
     .fd = open_port(8000),
     .init = &binary_init,
     .read = &binary_read,
+    .terminate = &binary_terminate,
   };
 
   protocol_t http = {
@@ -212,6 +213,7 @@ main(int argc, char *argv[])
     .init = &http_init,
     .read = &http_read,
     .write = &http_write,
+    .terminate = &http_terminate,
   };
 
   //
@@ -309,9 +311,10 @@ main(int argc, char *argv[])
           ret = close(client->fd);
           esprintf(ret, "close: %d", client->fd);
 
-          // protocol
+          // protocol->terminate is reponsible for free'ing its own context,
+          // closing open file descriptors, etc..
+          (*client->protocol->terminate)(client->context);
 
-          free(client->context);
           free(client);
           break;
         }

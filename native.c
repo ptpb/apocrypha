@@ -139,3 +139,16 @@ binary_read(void *buf_head, size_t buf_size,
  handled_buf:
   return (uint8_t *)buf - (uint8_t *)buf_head;
 }
+
+void
+binary_terminate(void *ptr)
+{
+  binary_context_t *context = (binary_context_t *)ptr;
+
+  if (context->write_fd != -1) {
+    unlink(context->temp_filename);
+    close(context->write_fd);
+  }
+
+  free(context);
+}

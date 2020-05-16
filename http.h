@@ -12,3 +12,6 @@ http_read(void *buf_head, size_t buf_size,
 size_t
 http_write(void *buf_head, size_t buf_size,
            void *ptr, protocol_state_t *protocol_state);
+
+void
+http_terminate(void *ptr);
