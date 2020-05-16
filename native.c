@@ -13,20 +13,26 @@
 #include "native.h"
 #include "protocol.h"
 
-typedef enum binary_state {
+typedef enum parser_state {
   READING_IDLE,
   READING_CLOSING_FILE,
   READING_CHUNK_SIZE,
   READING_CHUNK,
-  WRITING_RESPONSE,
-} binary_state_t;
+} parser_state_t;
+
+typedef enum emitter_state {
+  WRITING_DIGEST,
+} emitter_state_t;
 
 typedef struct binary_context {
-  binary_state_t state;
+  parser_state_t parser_state;
+  emitter_state_t emitter_state;
   uint32_t chunk_size;
   int write_fd;
   char temp_filename[7];
   EVP_MD_CTX digest;
+  uint8_t digest_value[EVP_MAX_MD_SIZE];
+  uint32_t digest_length;
 } binary_context_t;
 
 void *
@@ -37,7 +43,8 @@ binary_init(void)
   context = calloc(1, (sizeof (binary_context_t)));
 
   context->write_fd = -1;
-  context->state = READING_IDLE;
+  context->parser_state = READING_IDLE;
+  context->emitter_state = WRITING_DIGEST;
 
   return (void *)context;
 }
@@ -50,7 +57,7 @@ binary_init(void)
     _a < _b ? _a : _b; })
 
 size_t
-binary_read(void *buf_head, size_t buf_size,
+binary_read(void *const buf_head, size_t buf_size,
             void *ptr, protocol_state_t *protocol_state)
 {
   void *buf;
@@ -61,7 +68,7 @@ binary_read(void *buf_head, size_t buf_size,
   buf = buf_head;
 
   while (1) {
-    switch (context->state) {
+    switch (context->parser_state) {
     case READING_IDLE:
       strncpy(context->temp_filename, "XXXXXX", (sizeof (context->temp_filename)));
       ret = mkostemp(context->temp_filename, O_CLOEXEC);
@@ -70,19 +77,17 @@ binary_read(void *buf_head, size_t buf_size,
 
       EVP_DigestInit_ex(&context->digest, EVP_sha256(), NULL);
 
-      context->state = READING_CHUNK_SIZE;
+      context->parser_state = READING_CHUNK_SIZE;
       break;
     case READING_CLOSING_FILE:
       {
-        unsigned char md_value[EVP_MAX_MD_SIZE];
-        unsigned int md_length;
-        EVP_DigestFinal_ex(&context->digest, md_value, &md_length);
+        EVP_DigestFinal_ex(&context->digest, context->digest_value, &context->digest_length);
 
-        char hex_digest[md_length * 2 + 1];
-        hex_digest[md_length * 2 + 1] = '\0';
+        char hex_digest[context->digest_length * 2 + 1];
+        hex_digest[context->digest_length * 2 + 1] = '\0';
 
-        for (int i = 0; i < md_length; i++) {
-          snprintf(&hex_digest[i * 2], 3, "%02x", md_value[i]);
+        for (int i = 0; i < context->digest_length; i++) {
+          snprintf(&hex_digest[i * 2], 3, "%02x", context->digest_value[i]);
         }
         fprintf(stderr, "digest: %s -> %s\n", context->temp_filename, hex_digest);
 
@@ -95,7 +100,8 @@ binary_read(void *buf_head, size_t buf_size,
         context->write_fd = -1;
       }
 
-      context->state = READING_IDLE;
+      context->parser_state = READING_IDLE;
+      *protocol_state = PROTOCOL_WRITING;
       break;
     case READING_CHUNK_SIZE:
       if (_buf_length() < (sizeof (uint32_t)))
@@ -106,10 +112,10 @@ binary_read(void *buf_head, size_t buf_size,
 
       if (context->chunk_size == 0) {
         fprintf(stderr, "handle_buf: end of file\n");
-        context->state = READING_CLOSING_FILE;
+        context->parser_state = READING_CLOSING_FILE;
       } else {
         //fprintf(stderr, "handle_buf: chunk with size=%d\n", context->chunk_size);
-        context->state = READING_CHUNK;
+        context->parser_state = READING_CHUNK;
       }
       break;
     case READING_CHUNK:
@@ -126,12 +132,41 @@ binary_read(void *buf_head, size_t buf_size,
       buf += ret;
 
       if (context->chunk_size == 0)
-        context->state = READING_CHUNK_SIZE;
+        context->parser_state = READING_CHUNK_SIZE;
 
       break;
+    }
+  }
 
-    default:
-      assert(0 && "unreachable");
+ handled_buf:
+  return (uint8_t *)buf - (uint8_t *)buf_head;
+}
+
+size_t
+binary_write(void *const buf_head, size_t buf_size,
+             void *ptr, protocol_state_t *protocol_state)
+{
+  binary_context_t *context = (binary_context_t *)ptr;
+  void *buf = buf_head;
+
+  fprintf(stderr, "binary writing\n");
+
+  while (1) {
+    switch (context->emitter_state) {
+    case WRITING_DIGEST:
+      if (_buf_length() < (sizeof (uint32_t)) + context->digest_length)
+        goto handled_buf;
+
+      *(uint32_t*)buf = htonl(context->digest_length);
+      buf += (sizeof (uint32_t));
+      memcpy(buf, context->digest_value, context->digest_length);
+      buf += context->digest_length;
+
+
+      context->emitter_state = WRITING_DIGEST;
+      *protocol_state = PROTOCOL_READING;
+
+      goto handled_buf;
       break;
     }
   }

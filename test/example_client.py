@@ -1,3 +1,4 @@
+import binascii
 import hashlib
 import socket
 import ssl
@@ -11,17 +12,24 @@ ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-digest = hashlib.sha256()
-
 with socket.create_connection((host, port)) as sock, \
      ssl_context.wrap_socket(sock) as ssl_sock:
 
-    with open(sys.argv[1], "rb") as f:
-        while buf := f.read(1024 * 32):
-            ssl_sock.write(struct.pack("!L", len(buf)))
-            ssl_sock.write(buf)
-            digest.update(buf)
-            # tell the server we have finished transmitting the file
-        ssl_sock.write(struct.pack("!L", 0))
-    print(digest.hexdigest())
-    # we can either close the connection here, or start sending a new file
+    for filename in sys.argv[1:]:
+        digest = hashlib.sha256()
+
+        with open(filename, "rb") as f:
+            while buf := f.read(1024 * 32):
+                ssl_sock.write(struct.pack("!L", len(buf)))
+                ssl_sock.write(buf)
+                digest.update(buf)
+                # tell the server we have finished transmitting the file
+            ssl_sock.write(struct.pack("!L", 0))
+
+        remote_length, = struct.unpack("!L", ssl_sock.read(4))
+        remote_value = ssl_sock.read(remote_length)
+        assert(len(remote_value) == remote_length)
+        print(filename)
+        print("  local: ", digest.hexdigest())
+        print(" remote: ", binascii.hexlify(remote_value).decode("utf-8"))
+        # we can either close the connection here, or start sending a new file

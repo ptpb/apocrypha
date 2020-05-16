@@ -136,7 +136,7 @@ http_init(void)
   } while (0)
 
 size_t
-http_read(void *buf_head, size_t buf_size,
+http_read(void *const buf_head, size_t buf_size,
           void *ptr, protocol_state_t *protocol_state)
 {
   http_context_t *context = (http_context_t *)ptr;
@@ -273,7 +273,7 @@ http_read(void *buf_head, size_t buf_size,
 #define _buf_length() (buf_size - ((uint8_t *)buf - (uint8_t *)buf_head))
 
 size_t
-http_write(void *buf_head, size_t buf_size,
+http_write(void *const buf_head, size_t buf_size,
            void *ptr, protocol_state_t *protocol_state)
 {
   http_context_t *context = (http_context_t *)ptr;

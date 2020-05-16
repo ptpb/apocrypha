@@ -205,6 +205,7 @@ main(int argc, char *argv[])
     .fd = open_port(8000),
     .init = &binary_init,
     .read = &binary_read,
+    .write = &binary_write,
     .terminate = &binary_terminate,
   };
 
