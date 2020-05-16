@@ -10,6 +10,8 @@
 
 #include "error.h"
 #include "http.h"
+#include "protocol.h"
+
 
 typedef enum parser_terminator {
   INVALID_TERMINATOR = 0,
@@ -124,17 +126,18 @@ http_init(void)
   return (void *)context;
 }
 
-#define parser_stop(_status_code)           \
-  do {                                      \
-    context->status_code = _status_code;    \
-    context->emitter_state = EMITTER_IDLE;  \
-    context->parser_state = PARSER_INVALID; \
-    *want_write = 1;                        \
-    goto handled_buf;                       \
+#define parser_stop(_status_code, _protocol_state)  \
+  do {                                              \
+    context->status_code = _status_code;            \
+    context->emitter_state = EMITTER_IDLE;          \
+    context->parser_state = PARSER_INVALID;         \
+    *protocol_state = _protocol_state;              \
+    goto handled_buf;                               \
   } while (0)
 
 size_t
-http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
+http_read(void *buf_head, size_t buf_size,
+          void *ptr, protocol_state_t *protocol_state)
 {
   http_context_t *context = (http_context_t *)ptr;
   void *buf = buf_head;
@@ -195,9 +198,9 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     if (context->parser_state == PARSING_BODY) {
       if (buf_tail - (uint8_t *)buf != 0) {
         fprintf(stderr, "did not handle %ld bytes in body(?)", buf_tail - (uint8_t *)buf);
-        parser_stop(STATUS_BAD_REQUEST);
+        parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
       } else
-        parser_stop(STATUS_UNSET);
+        parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
     }
 
     fprintf(stderr, "parser: current_state: %d ", context->parser_state);
@@ -211,7 +214,7 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
 
     if (next_state == PARSER_INVALID) {
       fprintf(stderr, "no terminator match\n");
-      parser_stop(STATUS_BAD_REQUEST);
+      parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
     }
 
     switch (context->parser_state) {
@@ -222,7 +225,7 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     case PARSING_REQUEST_URI:
       if (ret - buf != URI_LENGTH) {
         fprintf(stderr, "wrong uri length\n");
-        parser_stop(STATUS_BAD_REQUEST);
+        parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
       }
       memcpy(context->uri, buf, ret - buf);
       fprintf(stderr, "uri: %s\n", context->uri);
@@ -230,7 +233,7 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     case PARSING_REQUEST_VERSION:
       if (memcmp(http_version, buf, ret - buf) != 0) {
         fprintf(stderr, "wrong http version\n");
-        parser_stop(STATUS_BAD_REQUEST);
+        parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
       }
       break;
     case PARSING_HEADER_NAME_OR_BODY:
@@ -238,7 +241,7 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
       case PARSING_BODY:
         if (buf != ret) {
           fprintf(stderr, "garbage between last terminator and body crlf\n");
-          parser_stop(STATUS_BAD_REQUEST);
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
         }
         break;
       case PARSING_HEADER_VALUE:
@@ -270,7 +273,8 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
 #define _buf_length() (buf_size - ((uint8_t *)buf - (uint8_t *)buf_head))
 
 size_t
-http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
+http_write(void *buf_head, size_t buf_size,
+           void *ptr, protocol_state_t *protocol_state)
 {
   http_context_t *context = (http_context_t *)ptr;
   uint8_t *buf = buf_head;
@@ -355,7 +359,7 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
           esprintf(ret, "close");
         }
 
-        *want_read = 1;
+        *protocol_state = PROTOCOL_READING;
         context->emitter_state = EMITTER_INVALID;
         context->parser_state = PARSING_REQUEST_METHOD;
 

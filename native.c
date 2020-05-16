@@ -11,6 +11,7 @@
 
 #include "error.h"
 #include "native.h"
+#include "protocol.h"
 
 typedef enum binary_state {
   READING_IDLE,
@@ -49,7 +50,8 @@ binary_init(void)
     _a < _b ? _a : _b; })
 
 size_t
-binary_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
+binary_read(void *buf_head, size_t buf_size,
+            void *ptr, protocol_state_t *protocol_state)
 {
   void *buf;
   ssize_t ret;

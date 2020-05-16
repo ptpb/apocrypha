@@ -15,18 +15,23 @@
 #include "error.h"
 #include "http.h"
 #include "native.h"
+#include "protocol.h"
 
 #define BUF_SIZE 65536
 
 typedef void *(protocol_init_t)(void);
-typedef size_t (protocol_read_t)(void *buf_head, size_t buf_size, void *ptr, int *want_write);
-typedef size_t (protocol_write_t)(void *buf_head, size_t buf_size, void *ptr, int *want_read);
+typedef size_t (protocol_read_t)(void *buf_head, size_t buf_size,
+                                 void *ptr, protocol_state_t *protocol_state);
+typedef size_t (protocol_write_t)(void *buf_head, size_t buf_size,
+                                  void *ptr, protocol_state_t *protocol_state);
+typedef void (protocol_terminate_t)(void *ptr);
 
 typedef struct protocol {
   int fd;
   protocol_init_t *init;
   protocol_read_t *read;
   protocol_write_t *write;
+  protocol_terminate_t *terminate;
 } protocol_t;
 
 typedef struct client {
@@ -37,8 +42,8 @@ typedef struct client {
   uint8_t write_buf[BUF_SIZE];
   ptrdiff_t write_buf_index;
 
-  size_t total_bytes_out;
   //
+  protocol_state_t protocol_state;
   protocol_t *protocol;
   void *context;
 } client_t;
@@ -63,9 +68,10 @@ new_client(int epoll_fd, int client_fd, struct tls *tls, protocol_t *protocol) {
 
   client->context = (*protocol->init)();
   client->protocol = protocol;
+  client->protocol_state = PROTOCOL_READING;
 
   ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &(struct epoll_event){
-    .events = EPOLLIN | EPOLLET,
+    .events = EPOLLIN | EPOLLONESHOT,
     .data.ptr = client,
   });
 
@@ -79,52 +85,25 @@ handle_client_read(int epoll_fd, client_t *client) {
   int ret;
   size_t buf_length;
   size_t buf_handled;
-  int want_write = 0;
 
-  while (want_write == 0) {
+  while (client->protocol_state == PROTOCOL_READING) {
     ret = tls_read(client->tls, client->read_buf + client->read_buf_index, (sizeof (client->read_buf)) - client->read_buf_index);
     if (ret == TLS_WANT_POLLIN)
       break;
     else if (ret < 0) {
       fprintf(stderr, "tls_read: %s\n", tls_error(client->tls));
-      break;
+      client->protocol_state = PROTOCOL_SHUTDOWN;
     } else if (ret == 0) {
-      ret = tls_close(client->tls);
-      if (ret < 0)
-        fprintf(stderr, "tls_close: %s\n", tls_error(client->tls));
-      tls_free(client->tls);
-
-      ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
-      esprintf(ret, "epoll_ctl: EPOLL_CTL_DEL");
-
-      ret = close(client->fd);
-      esprintf(ret, "close: %d", client->fd);
-
-      /*
-      ret = close(client->write_fd);
-      esprintf(ret, "close: %d", client->write_fd);
-      */
-
-      free(client->context);
-      free(client);
-      break;
+      client->protocol_state = PROTOCOL_SHUTDOWN;
     } else {
       //fprintf(stderr, "tls_read: %d\n", ret);
       buf_length = client->read_buf_index + ret;
-      buf_handled = (*client->protocol->read)(client->read_buf, buf_length, client->context, &want_write);
+      buf_handled = (*client->protocol->read)(client->read_buf, buf_length, client->context, &client->protocol_state);
 
       memmove(client->read_buf, client->read_buf + buf_handled, buf_length - buf_handled);
 
       client->read_buf_index = buf_length - buf_handled;
     }
-  }
-
-  if (want_write != 0) {
-    ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
-      .events = EPOLLOUT | EPOLLET,
-      .data.ptr = client,
-    });
-    esprintf(ret, "epoll_ctl: EPOLL_CTL_MOD");
   }
 }
 
@@ -132,54 +111,38 @@ static void
 handle_client_write(int epoll_fd, client_t *client)
 {
   int ret;
-  size_t buf_length;
-  size_t buf_written;
-  size_t write_length;
-  int want_read = 0;
+  size_t protocol_ret;
 
   fprintf(stderr, "handle_client_write\n");
 
-  while (1) {
-    if (want_read == 0) {
-      buf_length = (sizeof (client->write_buf)) - client->write_buf_index;
-      buf_written = (*client->protocol->write)(client->write_buf + client->write_buf_index, buf_length, client->context, &want_read);
-      write_length = client->write_buf_index + buf_written;
-      fprintf(stderr, "protocol->write: offset=%ld length=%ld written=%ld\n", client->write_buf_index, buf_length, buf_written);
+  if (client->protocol_state == PROTOCOL_WRITING) {
+    protocol_ret = (*client->protocol->write)(client->write_buf + client->write_buf_index,
+                                              (sizeof (client->write_buf)) - client->write_buf_index,
+                                              client->context, &client->protocol_state);
+    assert(protocol_ret != 0);
+    client->write_buf_index += protocol_ret;
+  }
+
+  assert(client->write_buf_index != 0);
+
+  size_t write_offset = 0;
+
+  while (write_offset != client->write_buf_index) {
+    fprintf(stderr, "tls_write: offset=%ld length=%ld\n", write_offset, client->write_buf_index - write_offset);
+    ret = tls_write(client->tls, client->write_buf + write_offset, client->write_buf_index - write_offset);
+    if (ret == TLS_WANT_POLLOUT) {
+      break;
+    } else if (ret < 0) {
+      fprintf(stderr, "tls_write: %s\n", tls_error(client->tls));
+      client->protocol_state = PROTOCOL_SHUTDOWN;
+      break;
     } else {
-      // drain
-      write_length = client->write_buf_index;
-      if (write_length == 0)
-        break;
-    }
-
-    if (write_length != 0) {
-      ret = tls_write(client->tls, client->write_buf, write_length);
-      fprintf(stderr, "tls_write: length=%ld ret=%d\n", write_length, ret);
-      client->total_bytes_out += ret;
-      if (ret == TLS_WANT_POLLOUT) {
-        client->write_buf_index = write_length;
-        break;
-      } else if (ret < 0) {
-        fprintf(stderr, "tls_write: %s\n", tls_error(client->tls));
-        break;
-      } else {
-        fprintf(stderr, "write_buf memmove: offset=%d length=%ld\n", ret, write_length - ret);
-        memmove(client->write_buf, client->write_buf + ret, write_length - ret);
-        client->write_buf_index = write_length - ret;
-      }
+      write_offset += ret;
     }
   }
 
-  fprintf(stderr, "handle_client_write: break\n");
-
-  if (want_read != 0 && write_length == 0) {
-    fprintf(stderr, "total_bytes_out: %ld\n", client->total_bytes_out);
-    ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
-      .events = EPOLLIN | EPOLLET,
-      .data.ptr = client,
-    });
-    esprintf(ret, "epoll_ctl: EPOLL_CTL_MOD");
-  }
+  memmove(client->write_buf, client->write_buf + write_offset, client->write_buf_index - write_offset);
+  client->write_buf_index -= write_offset;
 }
 
 int
@@ -302,10 +265,56 @@ main(int argc, char *argv[])
       } else {
         uint32_t event = events[event_index].events;
         client_t *client = (client_t *)events[event_index].data.ptr;
+        assert(((event & EPOLLIN) && client->protocol_state == PROTOCOL_READING) ||
+               ((event & EPOLLOUT) && client->protocol_state == PROTOCOL_WRITING));
+
         if (event & EPOLLIN)
           handle_client_read(epoll_fd, client);
         if (event & EPOLLOUT)
           handle_client_write(epoll_fd, client);
+
+        inline int draining(void)
+        {
+          int events = client->write_buf_index == 0 ? 0 : EPOLLOUT;
+          if (events != 0)
+            fprintf(stderr, "protocol_state: draining\n");
+          return events;
+        }
+
+        switch (client->protocol_state) {
+        case PROTOCOL_READING:
+          ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
+            .events = EPOLLIN | draining() | EPOLLONESHOT,
+            .data.ptr = client,
+          });
+          esprintf(ret, "epoll_ctl: EPOLL_CTL_MOD");
+          break;
+        case PROTOCOL_WRITING:
+          ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
+            .events = EPOLLOUT | EPOLLONESHOT,
+            .data.ptr = client,
+          });
+          esprintf(ret, "epoll_ctl: EPOLL_CTL_MOD");
+          break;
+        case PROTOCOL_SHUTDOWN:
+          fprintf(stderr, "PROTOCOL_SHUTDOWN\n");
+          ret = tls_close(client->tls);
+          if (ret < 0)
+            fprintf(stderr, "tls_close: %s\n", tls_error(client->tls));
+          tls_free(client->tls);
+
+          ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
+          esprintf(ret, "epoll_ctl: EPOLL_CTL_DEL");
+
+          ret = close(client->fd);
+          esprintf(ret, "close: %d", client->fd);
+
+          // protocol
+
+          free(client->context);
+          free(client);
+          break;
+        }
       }
     }
   }
