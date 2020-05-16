@@ -36,6 +36,8 @@ typedef struct client {
   ptrdiff_t read_buf_index;
   uint8_t write_buf[BUF_SIZE];
   ptrdiff_t write_buf_index;
+
+  size_t total_bytes_out;
   //
   protocol_t *protocol;
   void *context;
@@ -137,27 +139,41 @@ handle_client_write(int epoll_fd, client_t *client)
 
   fprintf(stderr, "handle_client_write\n");
 
-  while (want_read == 0) {
-    buf_length = (sizeof (client->write_buf)) - client->write_buf_index;
-    buf_written = (*client->protocol->write)(client->write_buf + client->write_buf_index, buf_length, client->context, &want_read);
-
-    write_length = client->write_buf_index + buf_written;
+  while (1) {
+    if (want_read == 0) {
+      buf_length = (sizeof (client->write_buf)) - client->write_buf_index;
+      buf_written = (*client->protocol->write)(client->write_buf + client->write_buf_index, buf_length, client->context, &want_read);
+      write_length = client->write_buf_index + buf_written;
+      fprintf(stderr, "protocol->write: offset=%ld length=%ld written=%ld\n", client->write_buf_index, buf_length, buf_written);
+    } else {
+      // drain
+      write_length = client->write_buf_index;
+      if (write_length == 0)
+        break;
+    }
 
     if (write_length != 0) {
       ret = tls_write(client->tls, client->write_buf, write_length);
-      if (ret == TLS_WANT_POLLOUT)
+      fprintf(stderr, "tls_write: length=%ld ret=%d\n", write_length, ret);
+      client->total_bytes_out += ret;
+      if (ret == TLS_WANT_POLLOUT) {
+        client->write_buf_index = write_length;
         break;
-      else if (ret < 0) {
+      } else if (ret < 0) {
         fprintf(stderr, "tls_write: %s\n", tls_error(client->tls));
         break;
       } else {
+        fprintf(stderr, "write_buf memmove: offset=%d length=%ld\n", ret, write_length - ret);
         memmove(client->write_buf, client->write_buf + ret, write_length - ret);
         client->write_buf_index = write_length - ret;
       }
     }
   }
 
-  if (want_read != 0) {
+  fprintf(stderr, "handle_client_write: break\n");
+
+  if (want_read != 0 && write_length == 0) {
+    fprintf(stderr, "total_bytes_out: %ld\n", client->total_bytes_out);
     ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
       .events = EPOLLIN | EPOLLET,
       .data.ptr = client,
@@ -257,7 +273,7 @@ main(int argc, char *argv[])
   //
 
   ret = chdir("objects");
-  esprintf(ret, "chdir");
+  esprintf(ret, "chdir: %s", "objects");
 
   //
 
