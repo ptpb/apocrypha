@@ -11,13 +11,13 @@
 #include "error.h"
 #include "http.h"
 
-typedef enum terminator {
+typedef enum parser_terminator {
   INVALID_TERMINATOR = 0,
   SPACE,
   CRLF,
   COLON,
   TERMINATOR_LAST,
-} terminator_t;
+} parser_terminator_t;
 
 typedef enum parser_state {
   PARSER_INVALID = 0,
@@ -108,7 +108,6 @@ typedef struct http_context {
   char uri[URI_LENGTH + 1];
   //
   status_code_t status_code;
-  int write_fd;
   int read_fd;
 } http_context_t;
 
@@ -120,9 +119,19 @@ http_init(void)
   context = calloc(1, (sizeof (http_context_t)));
   context->emitter_state = EMITTER_INVALID;
   context->parser_state = PARSING_REQUEST_METHOD;
+  context->read_fd = -1;
 
   return (void *)context;
 }
+
+#define parser_stop(_status_code)           \
+  do {                                      \
+    context->status_code = _status_code;    \
+    context->emitter_state = EMITTER_IDLE;  \
+    context->parser_state = PARSER_INVALID; \
+    *want_write = 1;                        \
+    goto handled_buf;                       \
+  } while (0)
 
 size_t
 http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
@@ -134,11 +143,11 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
 
   fprintf(stderr, "http_read %ld\n", buf_size);
 
-  terminator_t match;
+  parser_terminator_t match;
   int length;
 
   void *
-  next_terminator(terminator_t stop)
+  next_terminator(parser_terminator_t stop)
   {
     uint8_t *bufi = buf;
 
@@ -179,15 +188,16 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     return NULL;
   }
 
-  while (1) {
-    // FIXME: HACK
+  parser_state_t next_state;
+
+  while (context->parser_state != PARSER_INVALID) {
+
     if (context->parser_state == PARSING_BODY) {
-      if (buf_tail - (uint8_t *)buf != 0)
+      if (buf_tail - (uint8_t *)buf != 0) {
         fprintf(stderr, "did not handle %ld bytes in body(?)", buf_tail - (uint8_t *)buf);
-      context->emitter_state = EMITTER_IDLE;
-      context->parser_state = PARSER_INVALID;
-      *want_write = 1;
-      break;
+        parser_stop(STATUS_BAD_REQUEST);
+      } else
+        parser_stop(STATUS_UNSET);
     }
 
     fprintf(stderr, "parser: current_state: %d ", context->parser_state);
@@ -196,11 +206,12 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     if (ret == NULL)
       goto handled_buf;
 
-    parser_state_t next_state = transitions[context->parser_state][match].next_state;
+    next_state = transitions[context->parser_state][match].next_state;
     fprintf(stderr, "next_state: %d\n", next_state);
 
     if (next_state == PARSER_INVALID) {
-      fprintf(stderr, "FIXME: no terminator match; should close\n");
+      fprintf(stderr, "no terminator match\n");
+      parser_stop(STATUS_BAD_REQUEST);
     }
 
     switch (context->parser_state) {
@@ -209,20 +220,26 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
       fprintf(stderr, "method: %s\n", (char *)buf);
       break;
     case PARSING_REQUEST_URI:
-      if (ret - buf != URI_LENGTH)
-        fprintf(stderr, "wrong uri length; should 400\n");
+      if (ret - buf != URI_LENGTH) {
+        fprintf(stderr, "wrong uri length\n");
+        parser_stop(STATUS_BAD_REQUEST);
+      }
       memcpy(context->uri, buf, ret - buf);
       fprintf(stderr, "uri: %s\n", context->uri);
       break;
     case PARSING_REQUEST_VERSION:
-      if (memcmp(http_version, buf, ret - buf) != 0)
-        fprintf(stderr, "wrong http version; should 400\n");
+      if (memcmp(http_version, buf, ret - buf) != 0) {
+        fprintf(stderr, "wrong http version\n");
+        parser_stop(STATUS_BAD_REQUEST);
+      }
       break;
     case PARSING_HEADER_NAME_OR_BODY:
       switch (next_state) {
       case PARSING_BODY:
-        if (buf != ret)
+        if (buf != ret) {
           fprintf(stderr, "garbage between last terminator and body crlf\n");
+          parser_stop(STATUS_BAD_REQUEST);
+        }
         break;
       case PARSING_HEADER_VALUE:
         *(char *)ret = '\0';
@@ -243,7 +260,6 @@ http_read(void *buf_head, size_t buf_size, void *ptr, int *want_write)
     }
 
     context->parser_state = next_state;
-
     buf = ret + length;
   }
 
@@ -267,7 +283,9 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
 
     switch (context->emitter_state) {
     case EMITTER_IDLE:
-      context->read_fd = 0;
+      context->read_fd = -1;
+
+      fprintf(stderr, "idle %d\n", context->status_code);
 
       if (context->status_code != STATUS_UNSET)
         break;
@@ -284,7 +302,6 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
       }
 
       context->read_fd = ret;
-
       context->status_code = STATUS_OK;
 
       break;
@@ -318,8 +335,11 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
       if (_buf_length() < CHUNK_PAD_SIZE + 1)
         goto handled_buf;
 
-      ret = read(context->read_fd, buf + 6,
-                 _buf_length() - CHUNK_PAD_SIZE);
+      if (context->read_fd != -1)
+        ret = read(context->read_fd, buf + 6,
+                   _buf_length() - CHUNK_PAD_SIZE);
+      else
+        ret = 0;
       esprintf(ret, "read");
       if (ret == 0) {
         *buf++ = '0';
@@ -330,8 +350,10 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
 
         // end of file
         fprintf(stderr, "eof\n");
-        ret = close(context->read_fd);
-        esprintf(ret, "close");
+        if (context->read_fd != -1) {
+          ret = close(context->read_fd);
+          esprintf(ret, "close");
+        }
 
         *want_read = 1;
         context->emitter_state = EMITTER_INVALID;
@@ -348,6 +370,9 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
         buf += ret;
         *buf++ = '\r';
         *buf++ = '\n';
+
+        fprintf(stderr, "http body: requested=%ld wrote=%d actual=%ld\n", buf_size, ret, (uint8_t *)buf - (uint8_t *)buf_head);
+
         goto handled_buf;
       }
       break;
@@ -360,5 +385,6 @@ http_write(void *buf_head, size_t buf_size, void *ptr, int *want_read)
   }
 
  handled_buf:
+  fprintf(stderr, "handled_buf\n");
   return (uint8_t *)buf - (uint8_t *)buf_head;
 }
