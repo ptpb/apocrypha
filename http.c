@@ -13,6 +13,7 @@
 #include "http.h"
 #include "protocol.h"
 #include "mime_types.h"
+#include "hex.h"
 
 typedef enum parser_terminator {
   INVALID_TERMINATOR = 0,
@@ -482,7 +483,8 @@ http_write(void *const buf_head, size_t buf_size,
         esprintf(ret, "close");
       } else {
         assert(ret < 0xffff);
-        snprintf((char *)buf, 5, "%04x", (uint16_t)ret);
+        uint16_to_hex(buf, &ret, 1);
+        *(buf + 4) = '\0';
         buf += 4;
         *buf++ = '\r';
         *buf++ = '\n';

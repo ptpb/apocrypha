@@ -12,6 +12,7 @@
 #include "error.h"
 #include "native.h"
 #include "protocol.h"
+#include "hex.h"
 
 typedef enum parser_state {
   READING_IDLE,
@@ -84,11 +85,8 @@ binary_read(void *const buf_head, size_t buf_size,
         EVP_DigestFinal_ex(&context->digest, context->digest_value, &context->digest_length);
 
         char hex_digest[context->digest_length * 2 + 1];
-        hex_digest[context->digest_length * 2 + 1] = '\0';
-
-        for (int i = 0; i < context->digest_length; i++) {
-          snprintf(&hex_digest[i * 2], 3, "%02x", context->digest_value[i]);
-        }
+        hex_digest[context->digest_length * 2] = '\0';
+        uint8_to_hex(hex_digest, context->digest_value, context->digest_length);
         fprintf(stderr, "digest: %s -> %s\n", context->temp_filename, hex_digest);
 
         assert(context->write_fd > 0);
@@ -161,7 +159,6 @@ binary_write(void *const buf_head, size_t buf_size,
       buf += (sizeof (uint32_t));
       memcpy(buf, context->digest_value, context->digest_length);
       buf += context->digest_length;
-
 
       context->emitter_state = WRITING_DIGEST;
       *protocol_state = PROTOCOL_READING;

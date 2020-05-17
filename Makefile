@@ -1,6 +1,6 @@
 include config.mk
 
-SRC = main.c native.c http.c
+SRC = main.c native.c http.c hex.c
 OBJ = ${SRC:.c=.o}
 
 .c.o:
