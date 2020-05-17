@@ -39,9 +39,9 @@ typedef struct client {
   int fd;
   struct tls *tls;
   uint8_t read_buf[BUF_SIZE];
-  ptrdiff_t read_buf_index;
+  size_t read_buf_index;
   uint8_t write_buf[BUF_SIZE];
-  ptrdiff_t write_buf_index;
+  size_t write_buf_index;
 
   //
   protocol_state_t protocol_state;
@@ -82,7 +82,7 @@ new_client(int epoll_fd, int client_fd, struct tls *tls, protocol_t *protocol) {
 }
 
 static void
-handle_client_read(int epoll_fd, client_t *client) {
+handle_client_read(client_t *client) {
   int ret;
   size_t buf_length;
   size_t buf_handled;
@@ -109,7 +109,7 @@ handle_client_read(int epoll_fd, client_t *client) {
 }
 
 static void
-handle_client_write(int epoll_fd, client_t *client)
+handle_client_write(client_t *client)
 {
   int ret;
   size_t protocol_ret;
@@ -147,7 +147,7 @@ handle_client_write(int epoll_fd, client_t *client)
 }
 
 int
-main(int argc, char *argv[])
+main(void)
 {
   int ret;
   struct tls_config *tls_config;
@@ -273,16 +273,15 @@ main(int argc, char *argv[])
                ((event & EPOLLOUT) && client->protocol_state == PROTOCOL_WRITING));
 
         if (event & EPOLLIN)
-          handle_client_read(epoll_fd, client);
+          handle_client_read(client);
         if (event & EPOLLOUT)
-          handle_client_write(epoll_fd, client);
+          handle_client_write(client);
 
         inline int draining(void)
         {
-          int events = client->write_buf_index == 0 ? 0 : EPOLLOUT;
-          if (events != 0)
+          if ((ret = client->write_buf_index == 0 ? 0 : EPOLLOUT) != 0)
             fprintf(stderr, "protocol_state: draining\n");
-          return events;
+          return ret;
         }
 
         switch (client->protocol_state) {

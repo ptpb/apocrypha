@@ -72,8 +72,6 @@ typedef enum status_code {
   STATUS_CODE_LAST
 } status_code_t;
 
-#define STATUS_CODE_SIZE 3
-
 typedef enum emitter_state {
   EMITTER_INVALID = 0,
   EMITTER_RESOLVE_URI,
@@ -118,6 +116,8 @@ static emitter_state_t emitter_transitions[EMITTER_STATE_LAST][2] = {
   },
 };
 
+#define STATUS_CODE_SIZE 3
+
 static char
 protocol_code[STATUS_CODE_LAST][STATUS_CODE_SIZE] = {
   [STATUS_OK] = "200",
@@ -125,12 +125,12 @@ protocol_code[STATUS_CODE_LAST][STATUS_CODE_SIZE] = {
   [STATUS_NOT_FOUND] = "404",
 };
 
-#define HTTP_VERSION_SIZE 8
-static char http_version[HTTP_VERSION_SIZE] = "HTTP/1.1";
-#define HTTP_TE_HEADER_SIZE 26
-static char http_te_header[HTTP_TE_HEADER_SIZE] = "transfer-encoding: chunked";
-#define HTTP_CT_HEADER_SIZE 14
-static char http_ct_header[HTTP_CT_HEADER_SIZE] = "content-type: ";
+static char http_version[] = "HTTP/1.1";
+#define HTTP_VERSION_SIZE ((sizeof (http_version)) - 1)
+static char http_te_header[] = "transfer-encoding: chunked";
+#define HTTP_TE_HEADER_SIZE ((sizeof (http_te_header)) - 1)
+static char http_ct_header[] = "content-type: ";
+#define HTTP_CT_HEADER_SIZE ((sizeof (http_ct_header)) - 1)
 
 #define STATUS_LINE_LENGTH (HTTP_VERSION_SIZE + 1 + STATUS_CODE_SIZE + 3)
 

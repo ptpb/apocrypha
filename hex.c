@@ -24,7 +24,7 @@ static char hex_chars[] = {
 void
 uint8_to_hex(void *dst, const void *src, size_t n)
 {
-  ptrdiff_t i;
+  size_t i;
 
   for (i = 0; i < n; i++) {
     *(uint8_t*)dst++ = hex_chars[((uint8_t*)src)[i] >> 4 & 0xf];
@@ -35,7 +35,7 @@ uint8_to_hex(void *dst, const void *src, size_t n)
 void
 uint16_to_hex(void *dst, const void *src, size_t n)
 {
-  ptrdiff_t i;
+  size_t i;
   uint16_t v;
 
   for (i = 0; i < n; i++) {
