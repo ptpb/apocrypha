@@ -480,6 +480,7 @@ http_write(void *const buf_head, size_t buf_size,
         // end of file
         fprintf(stderr, "eof\n");
         ret = close(context->read_fd);
+        context->read_fd = -1;
         esprintf(ret, "close");
       } else {
         assert(ret < 0xffff);
@@ -516,6 +517,7 @@ http_write(void *const buf_head, size_t buf_size,
       // we are done, switch to PROTOCOL_READING
       *protocol_state = PROTOCOL_READING;
       assert(context->parser_state == PARSING_REQUEST_METHOD);
+      context->status_code = STATUS_UNSET;
       break;
     }
   }
