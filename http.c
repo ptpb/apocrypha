@@ -58,6 +58,7 @@ transitions[PARSER_STATE_LAST][TERMINATOR_LAST] = {
 };
 
 typedef enum method {
+  METHOD_INVALID = 0,
   METHOD_GET,
   METHOD_HEAD,
 } method_t;
@@ -162,7 +163,9 @@ http_init(void)
 
 #define parser_stop(_status_code, _protocol_state)          \
   do {                                                      \
-    context->status_code = _status_code;                    \
+    context->status_code =                                  \
+      context->status_code == STATUS_UNSET                  \
+      ? _status_code : context->status_code;                \
     context->parser_state = PARSING_REQUEST_METHOD;         \
     assert(context->emitter_state == EMITTER_RESOLVE_URI);  \
     *protocol_state = _protocol_state;                      \
@@ -253,8 +256,20 @@ http_read(void *const buf_head, size_t buf_size,
 
     switch (context->parser_state) {
     case PARSING_REQUEST_METHOD:
-      *(char *)ret = '\0';
-      fprintf(stderr, "method: %s\n", (char *)buf);
+      {
+        size_t method_length = ret - buf;
+        if (3 == method_length && memcmp(buf, "GET", 3) == 0)
+          context->method = METHOD_GET;
+        /*
+        else if (4 == method_length && memcmp(buf, "POST", 4) == 0)
+          context->method = METHOD_POST;
+        */
+        else {
+          *(char *)ret = '\0';
+          fprintf(stderr, "unsupported method: %s\n", (char *)buf);
+          context->status_code = STATUS_BAD_REQUEST;
+        }
+      }
       break;
     case PARSING_REQUEST_URI:
       context->uri_length = ret - buf;
