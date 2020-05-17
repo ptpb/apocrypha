@@ -248,12 +248,14 @@ main(void)
   struct epoll_event events[MAX_EVENTS];
   int event_index;
   void *event_ptr;
+  int total_events;
 
   while (1) {
     ret = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     esprintf(ret, "epoll_wait");
+    total_events = ret;
 
-    for (event_index = 0; event_index < ret; event_index++) {
+    for (event_index = 0; event_index < total_events; event_index++) {
       event_ptr = events[event_index].data.ptr;
       if (event_ptr == &binary || event_ptr == &http) {
         protocol_t *protocol = (protocol_t *)event_ptr;
