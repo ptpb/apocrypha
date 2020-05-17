@@ -2,14 +2,15 @@ include config.mk
 
 SRC = main.c native.c http.c hex.c
 OBJ = ${SRC:.c=.o}
+NAME = apocrypha
 
 .c.o:
 	@echo CC -c $<
 	@${CC} -c ${CFLAGS} $<
 
-pb3: ${OBJ}
+${NAME}: ${OBJ}
 	@echo CC -o $@
 	@${CC} -o $@ ${OBJ} ${LDFLAGS}
 
 clean:
-	rm -f pb3 ${OBJ}
+	rm -f ${NAME} ${OBJ}
