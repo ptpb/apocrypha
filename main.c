@@ -16,6 +16,7 @@
 #include "http.h"
 #include "native.h"
 #include "protocol.h"
+#include "config.h"
 
 #define BUF_SIZE 65536
 
@@ -158,13 +159,13 @@ main(int argc, char *argv[])
   tls_config = tls_config_new();
   assert(tls_config != NULL && "tls_config_new");
 
-  ret = tls_config_set_ca_file(tls_config, "/etc/ssl/cert.pem");
-  enprintf(ret, "tls_config_set_ca_file: %s", "/etc/ssl/cert.pem");
+  ret = tls_config_set_ca_file(tls_config, TLS_CA);
+  enprintf(ret, "tls_config_set_ca_file: %s", TLS_CA);
 
-  ret = tls_config_set_cert_file(tls_config, "localhost.crt.pem");
-  enprintf(ret, "tls_config_set_cert_file: %s", "localhost.crt.pem");
-  ret = tls_config_set_key_file(tls_config, "localhost.key.pem");
-  enprintf(ret, "tls_config_set_key_file: %s", "localhost.key.pem");
+  ret = tls_config_set_cert_file(tls_config, TLS_CERT);
+  enprintf(ret, "tls_config_set_cert_file: %s", TLS_CERT);
+  ret = tls_config_set_key_file(tls_config, TLS_KEY);
+  enprintf(ret, "tls_config_set_key_file: %s", TLS_KEY);
 
   tls = tls_server();
   assert(tls != NULL && "tls_server");
@@ -202,7 +203,7 @@ main(int argc, char *argv[])
   }
 
   protocol_t binary = {
-    .fd = open_port(8000),
+    .fd = open_port(NATIVE_PORT),
     .init = &binary_init,
     .read = &binary_read,
     .write = &binary_write,
@@ -210,7 +211,7 @@ main(int argc, char *argv[])
   };
 
   protocol_t http = {
-    .fd = open_port(8443),
+    .fd = open_port(HTTP_PORT),
     .init = &http_init,
     .read = &http_read,
     .write = &http_write,
