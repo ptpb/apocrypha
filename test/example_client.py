@@ -6,7 +6,7 @@ import struct
 import sys
 
 host = "localhost"
-port = 8000
+port = 26708
 
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
@@ -17,6 +17,9 @@ with socket.create_connection((host, port)) as sock, \
 
     for filename in sys.argv[1:]:
         digest = hashlib.sha256()
+
+        # request a prefix length of 3
+        ssl_sock.write(struct.pack("!B", 3))
 
         with open(filename, "rb") as f:
             while buf := f.read(1024 * 32):

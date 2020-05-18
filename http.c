@@ -338,36 +338,6 @@ find_mime_type(const char *ext)
   return NULL;
 }
 
-static int
-open_uri(const char *uri, uint8_t uri_length)
-{
-  fprintf(stderr, "open_uri: %s %d\n", uri, uri_length);
-  DIR *dir;
-  struct dirent *dirent;
-  int ret = -1;
-
-  if (uri_length > QUALIFIED_URI_LENGTH)
-    return -1;
-  else if (uri_length == QUALIFIED_URI_LENGTH)
-    return open(uri, O_RDONLY);
-  else {
-    dir = opendir(".");
-    if (dir == NULL)
-      return -1;
-    while ((dirent = readdir(dir)) != NULL) {
-      fprintf(stderr, "`%s`\n", dirent->d_name);
-      if (dirent->d_type == DT_REG &&
-          memcmp(dirent->d_name, uri, uri_length) == 0) {
-        fprintf(stderr, "open: %s\n", dirent->d_name);
-        ret = open(dirent->d_name, O_RDONLY);
-        break;
-      }
-    }
-    closedir(dir);
-  }
-  return ret;
-}
-
 size_t
 http_write(void *const buf_head, size_t buf_size,
            void *ptr, protocol_state_t *protocol_state)
@@ -388,13 +358,12 @@ http_write(void *const buf_head, size_t buf_size,
     case EMITTER_RESOLVE_URI:
       context->read_fd = -1;
 
-      fprintf(stderr, "idle %d\n", context->status_code);
-
       if (context->status_code != STATUS_UNSET)
         // if the parser set an error, move to the next state without resolving a uri
         break;
 
-      if (*context->uri != '/' || *(context->uri + 1) == '/') {
+      if (*context->uri != '/' ||
+          *(context->uri + 1) == '/' || *(context->uri + 1) == '.') {
         context->status_code = STATUS_BAD_REQUEST;
         break;
       }
@@ -407,13 +376,13 @@ http_write(void *const buf_head, size_t buf_size,
           context->mime_type = NULL;
         else {
           context->mime_type = find_mime_type(ext + 1);
-          fprintf(stderr, "mime_type: %s -> %s\n", ext, context->mime_type);
+          //fprintf(stderr, "mime_type: %s -> %s\n", ext, context->mime_type);
           *ext = '\0';
           context->uri_length = ext - context->uri;
         }
       }
 
-      ret = open_uri(context->uri + 1, context->uri_length - 1);
+      ret = open(context->uri + 1, O_RDONLY);
       if (ret < 0)
         context->status_code = STATUS_NOT_FOUND;
       else {

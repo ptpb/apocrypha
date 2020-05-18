@@ -16,6 +16,7 @@
 
 typedef enum parser_state {
   READING_IDLE,
+  READING_PREFIX_LENGTH,
   READING_CLOSING_FILE,
   READING_CHUNK_SIZE,
   READING_CHUNK,
@@ -29,6 +30,7 @@ typedef struct binary_context {
   parser_state_t parser_state;
   emitter_state_t emitter_state;
   uint32_t chunk_size;
+  uint8_t prefix_length;
   int write_fd;
   char temp_filename[7];
   EVP_MD_CTX digest;
@@ -71,12 +73,27 @@ binary_read(void *const buf_head, size_t buf_size,
   while (1) {
     switch (context->parser_state) {
     case READING_IDLE:
-      strncpy(context->temp_filename, "XXXXXX", (sizeof (context->temp_filename)));
+      memcpy(context->temp_filename, "XXXXXX", (sizeof (context->temp_filename)));
       ret = mkostemp(context->temp_filename, O_CLOEXEC);
       esprintf(ret, "mkostemp: %s", context->temp_filename);
       context->write_fd = ret;
 
       EVP_DigestInit_ex(&context->digest, EVP_sha256(), NULL);
+
+      context->parser_state = READING_PREFIX_LENGTH;
+      break;
+    case READING_PREFIX_LENGTH:
+      if (_buf_length() < (sizeof (uint8_t)))
+        goto handled_buf;
+
+      context->prefix_length = *(uint8_t *)buf++;
+
+      if (context->prefix_length != 0 &&
+          (context->prefix_length < 3 || context->prefix_length > 63)) {
+        fprintf(stderr, "invalid prefix length: %d", context->prefix_length);
+        *protocol_state = PROTOCOL_SHUTDOWN;
+        goto handled_buf;
+      }
 
       context->parser_state = READING_CHUNK_SIZE;
       break;
@@ -87,11 +104,21 @@ binary_read(void *const buf_head, size_t buf_size,
         char hex_digest[context->digest_length * 2 + 1];
         hex_digest[context->digest_length * 2] = '\0';
         uint8_to_hex(hex_digest, context->digest_value, context->digest_length);
-        fprintf(stderr, "digest: %s -> %s\n", context->temp_filename, hex_digest);
 
         assert(context->write_fd > 0);
         ret = rename(context->temp_filename, hex_digest);
         esprintf(ret, "rename: %s -> %s", context->temp_filename, hex_digest);
+
+        assert(context->digest_length * 2 > context->prefix_length);
+        if (context->prefix_length != 0) {
+          char prefix[context->prefix_length + 1];
+          prefix[context->prefix_length] = '\0';
+          memcpy(prefix, hex_digest, context->prefix_length);
+          ret = unlink(prefix);
+          assert(!(ret < 0) || errno == ENOENT);
+          ret = symlink(hex_digest, prefix);
+          esprintf(ret, "symlink: %s -> %s", prefix, hex_digest);
+        }
 
         ret = close(context->write_fd);
         esprintf(ret, "close: %d", context->write_fd);
