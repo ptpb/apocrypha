@@ -9,6 +9,8 @@
 
 #include <sys/fcntl.h>
 
+#include <openssl/evp.h>
+
 #include "error.h"
 #include "http.h"
 #include "protocol.h"
@@ -135,13 +137,12 @@ static char http_ct_header[] = "content-type: ";
 #define STATUS_LINE_LENGTH (HTTP_VERSION_SIZE + 1 + STATUS_CODE_SIZE + 3)
 
 #define MAX_URI_LENGTH 127
-#define QUALIFIED_URI_LENGTH 64
 
 typedef struct http_context {
   emitter_state_t emitter_state;
   parser_state_t parser_state;
   method_t method;
-  char uri[MAX_URI_LENGTH + 1];
+  char uri_buf[MAX_URI_LENGTH + 1];
   uint8_t uri_length;
   //
   const char *mime_type;
@@ -275,9 +276,12 @@ http_read(void *const buf_head, size_t buf_size,
         fprintf(stderr, "bad uri length\n");
         parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
       }
-      memcpy(context->uri, buf, ret - buf);
-      *(context->uri + context->uri_length) = '\0';
-      fprintf(stderr, "uri: %s\n", context->uri);
+      memcpy(context->uri_buf, buf, ret - buf);
+      *(context->uri_buf + context->uri_length) = '\0';
+
+      // the uri is treated as a secret; zeroize the read buffer now that we
+      // have a copy
+      memset(buf, '\0', ret - buf);
       break;
     case PARSING_REQUEST_VERSION:
       if (memcmp(http_version, buf, ret - buf) != 0) {
@@ -351,31 +355,69 @@ http_write(void *const buf_head, size_t buf_size,
         // if the parser set an error, move to the next state without resolving a uri
         break;
 
-      if (*context->uri != '/' ||
-          *(context->uri + 1) == '/' || *(context->uri + 1) == '.') {
-        context->status_code = STATUS_BAD_REQUEST;
-        break;
-      }
-
       {
+        if (*context->uri_buf != '/' ||
+            *(context->uri_buf + 1) == '/' || *(context->uri_buf + 1) == '.') {
+          context->status_code = STATUS_BAD_REQUEST;
+          break;
+        }
+
+        char *uri = context->uri_buf + 1;
+        uint8_t uri_length = context->uri_length - 1;
+
         char *ext;
         // find an extension
-        ext = memrchr(context->uri + 1, '.', context->uri_length);
+        ext = memrchr(uri, '.', context->uri_length);
         if (ext == NULL)
           context->mime_type = NULL;
         else {
           context->mime_type = find_mime_type(ext + 1);
           *ext = '\0';
-          context->uri_length = ext - context->uri;
+          // the entire client-provided uri could be sensitive, so we preserve
+          // the original context->uri_length for zeroization later
+          uri_length = ext - uri;
         }
-      }
 
-      ret = open(context->uri + 1, O_RDONLY);
-      if (ret < 0)
-        context->status_code = STATUS_NOT_FOUND;
-      else {
-        context->read_fd = ret;
-        context->status_code = STATUS_OK;
+        /*
+        A valid uri is either:
+
+        - the hexlified content digest
+        - a prefix of the hexlified content digest
+
+        A storage filename is either:
+
+        - the hexlified digest of a hexlified content digest
+        - the hexlified digest of a prefix of the hexlified content digest
+
+        The storage filename is always (2 * 32) bytes, regardless of prefix
+        length. This also means the client-requested prefix length is not known
+        in storage (though this isn't considered sensitive).
+        */
+
+        EVP_MD_CTX digest;
+        uint8_t storage_digest[EVP_MAX_MD_SIZE];
+        uint32_t storage_digest_length;
+
+        EVP_DigestInit(&digest, EVP_sha256());
+        uri[uri_length] = '\0';
+        EVP_DigestUpdate(&digest, uri, uri_length);
+        EVP_DigestFinal(&digest, storage_digest, &storage_digest_length);
+
+        // now that we're done with the uri, zeroize the client-provided uri
+        memset(context->uri_buf, '\0', context->uri_length);
+
+        char storage_hex_digest[storage_digest_length * 2 + 1];
+        storage_hex_digest[storage_digest_length * 2] = '\0';
+        uint8_to_hex(storage_hex_digest, storage_digest, storage_digest_length);
+
+        //
+        ret = open(storage_hex_digest, O_RDONLY);
+        if (ret < 0)
+          context->status_code = STATUS_NOT_FOUND;
+        else {
+          context->read_fd = ret;
+          context->status_code = STATUS_OK;
+        }
       }
       break;
     case EMITTING_STATUS_LINE:
