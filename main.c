@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -146,33 +147,98 @@ handle_client_write(client_t *client)
   client->write_buf_index -= write_offset;
 }
 
-int
-main(void)
+void
+load_tls_config(int dirfd, struct tls *ctx)
 {
-  int ret;
   struct tls_config *tls_config;
-  struct tls *tls;
+  int ret;
 
-  ret = tls_init();
-  enprintf(ret, "tls_init");
+  static uint8_t buf[8092];
+
+  //
 
   tls_config = tls_config_new();
   assert(tls_config != NULL && "tls_config_new");
 
-  ret = tls_config_set_ca_file(tls_config, TLS_CA);
-  enprintf(ret, "tls_config_set_ca_file: %s", TLS_CA);
+  //
 
-  ret = tls_config_set_cert_file(tls_config, TLS_CERT);
-  enprintf(ret, "tls_config_set_cert_file: %s", TLS_CERT);
-  ret = tls_config_set_key_file(tls_config, TLS_KEY);
-  enprintf(ret, "tls_config_set_key_file: %s", TLS_KEY);
+  ssize_t size;
+  int fd;
+
+  fd = openat(dirfd, TLS_CERT, O_RDONLY);
+  esprintf(fd, "open: %s", TLS_CERT);
+
+  size = read(fd, buf, (sizeof (buf)));
+  esprintf(size, "read: %s", TLS_CERT);
+  assert(size != (sizeof (buf)) && "tls_cert too large");
+
+  ret = tls_config_set_cert_mem(tls_config, buf, size);
+  etcprintf(ret, tls_config, "tls_config_set_cert_mem: %s", TLS_CERT);
+
+  ret = close(fd);
+  esprintf(ret, "close");
+
+  //
+
+  fd = openat(dirfd, TLS_KEY, O_RDONLY);
+  esprintf(fd, "open: %s", TLS_CERT);
+
+  size = read(fd, buf, (sizeof (buf)));
+  esprintf(size, "read: %s", TLS_CERT);
+  assert(size != (sizeof (buf)) && "tls_key too large");
+
+  ret = tls_config_set_key_mem(tls_config, buf, size);
+  etcprintf(ret, tls_config, "tls_config_set_key_mem: %s", TLS_KEY);
+
+  ret = close(fd);
+  esprintf(ret, "close");
+
+  //
+
+  ret = tls_configure(ctx, tls_config);
+  enprintf(ret, "tls_configure");
+
+  tls_config_free(tls_config);
+}
+
+typedef enum signal_state {
+  SIGNAL_NONE,
+  SIGNAL_WANT_TLS_CONFIG_RELOAD,
+} signal_state_t;
+
+static signal_state_t signal_state = SIGNAL_NONE;
+
+static void
+sighup_handler(int signum)
+{
+  assert(signum == SIGHUP);
+  signal_state = SIGNAL_WANT_TLS_CONFIG_RELOAD;
+}
+
+int
+main(void)
+{
+  int ret;
+  struct tls *tls;
+
+  //
+
+  int dirfd;
+  dirfd = open(".", O_DIRECTORY);
+  esprintf(dirfd, "open: .");
+
+  ret = chdir("objects");
+  esprintf(ret, "chdir: %s", "objects");
+
+  //
+
+  ret = tls_init();
+  enprintf(ret, "tls_init");
 
   tls = tls_server();
   assert(tls != NULL && "tls_server");
 
-  ret = tls_configure(tls, tls_config);
-  enprintf(ret, "tls_configure");
-
+  load_tls_config(dirfd, tls);
   //
 
   int
@@ -239,21 +305,37 @@ main(void)
 
   //
 
-  ret = chdir("objects");
-  esprintf(ret, "chdir: %s", "objects");
+  struct sigaction sa;
+  sa.sa_handler = sighup_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  ret = sigaction(SIGHUP, &sa, NULL);
+  esprintf(ret, "sigaction: SIGHUP");
 
   //
 
   int client_fd;
   struct epoll_event events[MAX_EVENTS];
-  int event_index;
   void *event_ptr;
-  int total_events;
+  int event_index;
 
   while (1) {
-    ret = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-    esprintf(ret, "epoll_wait");
-    total_events = ret;
+    switch (signal_state) {
+    case SIGNAL_WANT_TLS_CONFIG_RELOAD:
+      fprintf(stderr, "want_tls_config_reload\n");
+      tls_reset(tls);
+      load_tls_config(dirfd, tls);
+      signal_state = SIGNAL_NONE;
+      break;
+    case SIGNAL_NONE:
+      break;
+    }
+
+    const int total_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+    if (total_events < 0 && errno == EINTR)
+      continue;
+    else
+      esprintf(total_events, "epoll_wait");
 
     for (event_index = 0; event_index < total_events; event_index++) {
       event_ptr = events[event_index].data.ptr;
@@ -264,6 +346,7 @@ main(void)
           if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
             break;
           esprintf(ret, "accept4");
+          fprintf(stderr, "accept4 %d\n", ret);
           client_fd = ret;
 
           new_client(epoll_fd, client_fd, tls, protocol);
@@ -328,7 +411,6 @@ main(void)
   //
 
   tls_free(tls);
-  tls_config_free(tls_config);
 
   return 0;
 }
