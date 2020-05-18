@@ -115,8 +115,6 @@ handle_client_write(client_t *client)
   int ret;
   size_t protocol_ret;
 
-  fprintf(stderr, "handle_client_write\n");
-
   if (client->protocol_state == PROTOCOL_WRITING) {
     protocol_ret = (*client->protocol->write)(client->write_buf + client->write_buf_index,
                                               (sizeof (client->write_buf)) - client->write_buf_index,
@@ -130,7 +128,6 @@ handle_client_write(client_t *client)
   size_t write_offset = 0;
 
   while (write_offset != client->write_buf_index) {
-    fprintf(stderr, "tls_write: offset=%ld length=%ld\n", write_offset, client->write_buf_index - write_offset);
     ret = tls_write(client->tls, client->write_buf + write_offset, client->write_buf_index - write_offset);
     if (ret == TLS_WANT_POLLOUT) {
       break;

@@ -241,14 +241,11 @@ http_read(void *const buf_head, size_t buf_size,
         parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
     }
 
-    fprintf(stderr, "parser: current_state: %d ", context->parser_state);
-
     ret = next_terminator(context->parser_state == PARSING_HEADER_VALUE ? CRLF : INVALID_TERMINATOR);
     if (ret == NULL)
       goto handled_buf;
 
     next_state = transitions[context->parser_state][match].next_state;
-    fprintf(stderr, "next_state: %d\n", next_state);
 
     if (next_state == PARSER_INVALID) {
       fprintf(stderr, "no terminator match\n");
@@ -297,8 +294,6 @@ http_read(void *const buf_head, size_t buf_size,
         }
         break;
       case PARSING_HEADER_VALUE:
-        *(char *)ret = '\0';
-        fprintf(stderr, "header-name: %s\n", (char *)buf);
         break;
       default:
         assert(0 && "unreachable");
@@ -306,8 +301,6 @@ http_read(void *const buf_head, size_t buf_size,
       }
       break;
     case PARSING_HEADER_VALUE:
-      *(char *)ret = '\0';
-      fprintf(stderr, "header-value: %s\n", (char *)buf);
       break;
     default:
       assert(0 && "unreachable");
@@ -346,11 +339,7 @@ http_write(void *const buf_head, size_t buf_size,
   uint8_t *buf = buf_head;
   int ret;
 
-  fprintf(stderr, "http_write\n");
-
   while (1) {
-    fprintf(stderr, "emitter: current_state: %d\n", context->emitter_state);
-
     assert(!(context->emitter_state != EMITTER_RESOLVE_URI &&
              context->status_code == STATUS_UNSET));
 
@@ -376,7 +365,6 @@ http_write(void *const buf_head, size_t buf_size,
           context->mime_type = NULL;
         else {
           context->mime_type = find_mime_type(ext + 1);
-          //fprintf(stderr, "mime_type: %s -> %s\n", ext, context->mime_type);
           *ext = '\0';
           context->uri_length = ext - context->uri;
         }
@@ -454,15 +442,12 @@ http_write(void *const buf_head, size_t buf_size,
       } else {
         assert(ret < 0xffff);
         uint16_to_hex(buf, &ret, 1);
-        *(buf + 4) = '\0';
         buf += 4;
         *buf++ = '\r';
         *buf++ = '\n';
         buf += ret;
         *buf++ = '\r';
         *buf++ = '\n';
-
-        fprintf(stderr, "http body: requested=%ld wrote=%d actual=%ld\n", buf_size, ret, (uint8_t *)buf - (uint8_t *)buf_head);
         goto handled_buf;
       }
       break;
@@ -492,7 +477,6 @@ http_write(void *const buf_head, size_t buf_size,
   }
 
  handled_buf:
-  fprintf(stderr, "handled_buf\n");
   return (uint8_t *)buf - (uint8_t *)buf_head;
 }
 
