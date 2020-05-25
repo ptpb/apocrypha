@@ -14,6 +14,8 @@
 #include "protocol.h"
 #include "mime_types.h"
 #include "hex.h"
+#include "token.h"
+#include "storage.h"
 
 typedef enum parser_terminator {
   INVALID_TERMINATOR = 0,
@@ -33,6 +35,12 @@ typedef enum parser_state {
   PARSING_BODY,
   PARSER_STATE_LAST,
 } parser_state_t;
+
+typedef enum parser_storage_state {
+  PARSER_STORAGE_OPENING = 0,
+  PARSER_STORAGE_WRITING,
+  PARSER_STORAGE_CLOSING,
+} parser_storage_state_t;
 
 typedef struct parser_transition {
   parser_state_t next_state;
@@ -62,6 +70,7 @@ typedef enum method {
   METHOD_INVALID = 0,
   METHOD_GET,
   METHOD_HEAD,
+  METHOD_POST,
 } method_t;
 
 typedef enum status_code {
@@ -71,6 +80,18 @@ typedef enum status_code {
   STATUS_NOT_FOUND,
   STATUS_CODE_LAST
 } status_code_t;
+
+typedef enum header {
+  HEADER_DONTCARE = 0,
+  HEADER_CONTENT_LENGTH,
+  HEADER_TRANSFER_ENCODING,
+} header_t;
+
+typedef enum length_mode {
+  LENGTH_MODE_NONE = 0,
+  LENGTH_MODE_FIXED,
+  LENGTH_MODE_CHUNKED,
+} length_mode_t;
 
 typedef enum emitter_state {
   EMITTER_INVALID = 0,
@@ -138,40 +159,136 @@ static char http_ct_header[] = "content-type: ";
 #define QUALIFIED_URI_LENGTH 64
 
 typedef struct http_context {
-  emitter_state_t emitter_state;
-  parser_state_t parser_state;
+  struct {
+    emitter_state_t state;
+    int read_fd;
+  } emitter;
+  struct {
+    parser_state_t state;
+    storage_context_t storage;
+    parser_storage_state_t storage_state;
+  } parser;
   method_t method;
+  header_t current_header;
+  length_mode_t length_mode;
+  union {
+    struct {
+      uint64_t length;
+      uint64_t read;
+    } fixed;
+    struct {
+      uint64_t length;
+      uint64_t read;
+    } chunked;
+  };
   char uri[MAX_URI_LENGTH + 1];
   uint8_t uri_length;
   //
   const char *mime_type;
   status_code_t status_code;
-  int read_fd;
+  //
 } http_context_t;
+
+static void
+http_context_init(http_context_t *context)
+{
+  context->emitter.state = EMITTER_RESOLVE_URI;
+  context->parser.state = PARSING_REQUEST_METHOD;
+  context->parser.storage_state = PARSER_STORAGE_OPENING;
+  context->current_header = HEADER_DONTCARE;
+  context->length_mode = LENGTH_MODE_NONE;
+
+  // clobbering read_fd here assumes emitter never has a recoverable
+  // failure. This is currently true.
+  context->parser.storage.write_fd = -1;
+  context->emitter.read_fd = -1;
+}
 
 void *
 http_init(void)
 {
-  http_context_t *context;
-
-  context = calloc(1, (sizeof (http_context_t)));
-  context->emitter_state = EMITTER_RESOLVE_URI;
-  context->parser_state = PARSING_REQUEST_METHOD;
-  context->read_fd = -1;
-
-  return (void *)context;
+  http_context_t *context = calloc(1, (sizeof (http_context_t)));
+  http_context_init(context);
+  return context;
 }
 
 #define parser_stop(_status_code, _protocol_state)          \
   do {                                                      \
+    http_context_init(context);                             \
     context->status_code =                                  \
       context->status_code == STATUS_UNSET                  \
       ? _status_code : context->status_code;                \
-    context->parser_state = PARSING_REQUEST_METHOD;         \
-    assert(context->emitter_state == EMITTER_RESOLVE_URI);  \
     *protocol_state = _protocol_state;                      \
     goto handled_buf;                                       \
   } while (0)
+
+typedef struct header_entry {
+  uint8_t *string;
+  uint8_t length;
+  header_t header;
+} header_entry_t;
+
+static header_entry_t string_headers[] = {
+  {(uint8_t *)"content-length", 14, HEADER_CONTENT_LENGTH},
+  {(uint8_t *)"transfer-encoding", 17, HEADER_CONTENT_LENGTH},
+};
+
+header_t
+parse_header_name(void *buf, size_t len)
+{
+  size_t i;
+  header_entry_t *entry;
+  normalize_ascii_case(buf, len);
+
+  for (i = 0; i < (sizeof (string_headers)) / (sizeof (header_entry_t)); i++) {
+    entry = string_headers + i;
+    if (entry->length == len && memcmp(entry->string, buf, len) == 0)
+      return entry->header;
+  }
+  return HEADER_DONTCARE;
+}
+
+#define min(a, b)               \
+  ({ typeof (a) _a = (a);       \
+    typeof (b) _b = (b);        \
+    _a < _b ? _a : _b; })
+
+static size_t
+handle_body_storage(storage_context_t *storage,
+                    parser_storage_state_t *state,
+                    void *const buf, size_t len)
+{
+  uint8_t *bufi = buf;
+  ssize_t ret;
+
+  while (buf == NULL || len > 0) {
+    switch (*state) {
+    case PARSER_STORAGE_OPENING:
+      storage_open_writer(storage);
+      *state = PARSER_STORAGE_WRITING;
+      break;
+    case PARSER_STORAGE_WRITING:
+      if (buf == NULL)
+        *state = PARSER_STORAGE_CLOSING;
+      else {
+        ret = storage_write(storage, bufi, len);
+        assert(ret >= 0);
+        bufi += ret;
+        len -= ret;
+      }
+      break;
+    case PARSER_STORAGE_CLOSING:
+      // fixme: hardcoded prefix length 6
+      storage_close_writer(storage, 6);
+      *state = PARSER_STORAGE_OPENING;
+      goto done;
+      break;
+    }
+  }
+
+done:
+  return bufi - (uint8_t *)buf;
+}
 
 size_t
 http_read(void *const buf_head, size_t buf_size,
@@ -179,7 +296,7 @@ http_read(void *const buf_head, size_t buf_size,
 {
   http_context_t *context = (http_context_t *)ptr;
   void *buf = buf_head;
-  void *ret;
+  void *ret = NULL;
   uint8_t *buf_tail = (uint8_t *)buf_head + buf_size;
 
   fprintf(stderr, "http_read %ld\n", buf_size);
@@ -229,39 +346,34 @@ http_read(void *const buf_head, size_t buf_size,
     return NULL;
   }
 
-  parser_state_t next_state;
+  parser_state_t next_state = PARSER_INVALID;
 
-  while (context->parser_state != PARSER_INVALID) {
+  while (context->parser.state != PARSER_INVALID) {
 
-    if (context->parser_state == PARSING_BODY) {
-      if (buf_tail - (uint8_t *)buf != 0) {
-        fprintf(stderr, "did not handle %ld bytes in body(?)", buf_tail - (uint8_t *)buf);
+    // PARSING_BODY handles its own state transitions
+    if (context->parser.state != PARSING_BODY) {
+      ret = next_terminator(context->parser.state == PARSING_HEADER_VALUE ? CRLF : INVALID_TERMINATOR);
+      if (ret == NULL)
+        goto handled_buf;
+
+      next_state = transitions[context->parser.state][match].next_state;
+
+      if (next_state == PARSER_INVALID) {
+        fprintf(stderr, "no terminator match\n");
         parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
-      } else
-        parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
+      }
     }
 
-    ret = next_terminator(context->parser_state == PARSING_HEADER_VALUE ? CRLF : INVALID_TERMINATOR);
-    if (ret == NULL)
-      goto handled_buf;
+    assert(ret != NULL);
 
-    next_state = transitions[context->parser_state][match].next_state;
-
-    if (next_state == PARSER_INVALID) {
-      fprintf(stderr, "no terminator match\n");
-      parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
-    }
-
-    switch (context->parser_state) {
+    switch (context->parser.state) {
     case PARSING_REQUEST_METHOD:
       {
         size_t method_length = ret - buf;
         if (3 == method_length && memcmp(buf, "GET", 3) == 0)
           context->method = METHOD_GET;
-        /*
         else if (4 == method_length && memcmp(buf, "POST", 4) == 0)
           context->method = METHOD_POST;
-        */
         else {
           *(char *)ret = '\0';
           fprintf(stderr, "unsupported method: %s\n", (char *)buf);
@@ -294,6 +406,8 @@ http_read(void *const buf_head, size_t buf_size,
         }
         break;
       case PARSING_HEADER_VALUE:
+        // we have a header name
+        context->current_header = parse_header_name(buf, ret - buf);
         break;
       default:
         assert(0 && "unreachable");
@@ -301,13 +415,86 @@ http_read(void *const buf_head, size_t buf_size,
       }
       break;
     case PARSING_HEADER_VALUE:
+      if (context->current_header == HEADER_DONTCARE)
+        // don't try to parse DONTCARE headers at all
+        break;
+      {
+        uint8_t *value, *end;
+        int valid;
+        value = mem_nows(buf, ret - buf);
+        end = mem_rnows(buf, ret - buf);
+
+        switch (context->current_header) {
+        case HEADER_TRANSFER_ENCODING:
+          if (context->length_mode != LENGTH_MODE_NONE)
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+          assert(0 && "te parsing not implemented");
+          context->length_mode = LENGTH_MODE_CHUNKED;
+          break;
+        case HEADER_CONTENT_LENGTH:
+          if (context->length_mode != LENGTH_MODE_NONE)
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+          valid = mem_decimal_uint64(value, end - value, &context->fixed.length);
+          if (valid < 0)
+            // rfc7320: [if] single Content-Length header field [has] an invalid
+            // value, then the message framing is invalid and the recipient MUST
+            // treat it as an unrecoverable error
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+          context->length_mode = LENGTH_MODE_FIXED;
+          break;
+        case HEADER_DONTCARE:
+          assert(0 && "unreachable");
+          break;
+        }
+      }
+      break;
+    case PARSING_BODY:
+      switch (context->length_mode) {
+      case LENGTH_MODE_NONE:
+        if (context->method == METHOD_GET)
+          parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
+        else
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
+        break;
+      case LENGTH_MODE_FIXED:
+        if (context->method == METHOD_POST) {
+          size_t len = min(context->fixed.length - context->fixed.read,
+                           (size_t)(buf_tail - (uint8_t *)buf));
+
+          len = handle_body_storage(&context->parser.storage,
+                                    &context->parser.storage_state,
+                                    buf, len);
+
+          buf += len;
+          context->fixed.read += len;
+          assert(!(context->fixed.read > context->fixed.length));
+
+          if (context->fixed.read == context->fixed.length) {
+            handle_body_storage(&context->parser.storage,
+                                &context->parser.storage_state,
+                                NULL, 0);
+            parser_stop(STATUS_OK, PROTOCOL_WRITING);
+          } else
+            goto handled_buf;
+        } else
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
+
+        break;
+      case LENGTH_MODE_CHUNKED:
+        assert(0 && "not implemented");
+        break;
+      }
+      assert(0 && "unreachable: implicit body state transition");
       break;
     default:
-      assert(0 && "unreachable");
+      assert(0 && "unreachable: invalid context state");
       break;
     }
 
-    context->parser_state = next_state;
+    context->parser.state = next_state;
     buf = ret + length;
   }
 
@@ -340,12 +527,17 @@ http_write(void *const buf_head, size_t buf_size,
   int ret;
 
   while (1) {
-    assert(!(context->emitter_state != EMITTER_RESOLVE_URI &&
+    assert(!(context->emitter.state != EMITTER_RESOLVE_URI &&
              context->status_code == STATUS_UNSET));
 
-    switch (context->emitter_state) {
+    switch (context->emitter.state) {
     case EMITTER_RESOLVE_URI:
-      context->read_fd = -1;
+      // fixme: emitter_resolve_uri is a GET concept; maybe this is entire state
+      // is actually a "parser" concern
+      if (context->method != METHOD_GET)
+        break;
+
+      context->emitter.read_fd = -1;
 
       if (context->status_code != STATUS_UNSET)
         // if the parser set an error, move to the next state without resolving a uri
@@ -374,7 +566,7 @@ http_write(void *const buf_head, size_t buf_size,
       if (ret < 0)
         context->status_code = STATUS_NOT_FOUND;
       else {
-        context->read_fd = ret;
+        context->emitter.read_fd = ret;
         context->status_code = STATUS_OK;
       }
       break;
@@ -424,31 +616,59 @@ http_write(void *const buf_head, size_t buf_size,
       break;
     case EMITTING_BODY:
       #define CHUNK_PAD_SIZE (4 + 2 + 2)
+      #define CHUNK_OFFSET (4 + 2)
 
-      // need at least 1 byte to read
-      if (_buf_length() < CHUNK_PAD_SIZE + 1)
-        goto handled_buf;
+      #define terminate_chunk(_size)     \
+        do {                             \
+          assert(_size < 0xffff);        \
+          uint16_to_hex(buf, &_size, 1); \
+          buf += 4;                      \
+          *buf++ = '\r';                 \
+          *buf++ = '\n';                 \
+          buf += _size;                  \
+          *buf++ = '\r';                 \
+          *buf++ = '\n';                 \
+        } while (0);
 
-      assert(context->read_fd != -1);
-      ret = read(context->read_fd, buf + 6,
-                 _buf_length() - CHUNK_PAD_SIZE);
-      esprintf(ret, "read");
-      if (ret == 0) {
-        // end of file
-        fprintf(stderr, "eof\n");
-        ret = close(context->read_fd);
-        context->read_fd = -1;
-        esprintf(ret, "close");
-      } else {
-        assert(ret < 0xffff);
-        uint16_to_hex(buf, &ret, 1);
-        buf += 4;
-        *buf++ = '\r';
-        *buf++ = '\n';
-        buf += ret;
-        *buf++ = '\r';
-        *buf++ = '\n';
-        goto handled_buf;
+      switch (context->method) {
+      case METHOD_GET:
+        // need at least 1 byte to read
+        if (_buf_length() < CHUNK_PAD_SIZE + 1)
+          goto handled_buf;
+
+        assert(context->emitter.read_fd != -1);
+        ret = read(context->emitter.read_fd, buf + CHUNK_OFFSET,
+                   _buf_length() - CHUNK_PAD_SIZE);
+        esprintf(ret, "read");
+        if (ret == 0) {
+          // end of file
+          fprintf(stderr, "eof\n");
+          ret = close(context->emitter.read_fd);
+          context->emitter.read_fd = -1;
+          esprintf(ret, "close");
+        } else {
+          terminate_chunk(ret);
+          goto handled_buf;
+        }
+        break;
+      case METHOD_POST:
+        {
+          uint64_t hex_len = context->parser.storage.digest_length * 2;
+
+          if (_buf_length() < CHUNK_PAD_SIZE + hex_len + 1)
+            goto handled_buf;
+
+          memcpy(buf + CHUNK_OFFSET,
+                 context->parser.storage.hex_digest,
+                 hex_len);
+          *(buf + CHUNK_OFFSET + hex_len) = '\n';
+          hex_len++;
+          terminate_chunk(hex_len);
+        }
+        break;
+      default:
+        assert(0 && "unreachable");
+        break;
       }
       break;
     case EMITTING_CHUNKED_EOF:
@@ -466,11 +686,11 @@ http_write(void *const buf_head, size_t buf_size,
       break;
     }
 
-    context->emitter_state = emitter_transitions[context->emitter_state][context->status_code == STATUS_OK];
-    if (context->emitter_state == EMITTER_RESOLVE_URI) {
+    context->emitter.state = emitter_transitions[context->emitter.state][context->status_code == STATUS_OK];
+    if (context->emitter.state == EMITTER_RESOLVE_URI) {
       // we are done, switch to PROTOCOL_READING
       *protocol_state = PROTOCOL_READING;
-      assert(context->parser_state == PARSING_REQUEST_METHOD);
+      assert(context->parser.state == PARSING_REQUEST_METHOD);
       context->status_code = STATUS_UNSET;
       break;
     }
@@ -485,8 +705,11 @@ http_terminate(void *ptr)
 {
   http_context_t *context = (http_context_t *)ptr;
 
-  if (context->read_fd != -1)
-    close(context->read_fd);
+  if (context->emitter.read_fd != -1)
+    close(context->emitter.read_fd);
+
+  if (context->parser.storage.write_fd != -1)
+    close(context->parser.storage.write_fd);
 
   free(context);
 }

@@ -8,6 +8,7 @@ LIBS = -ltls -lcrypto
 WARNINGS = \
 	-Wall -Wextra -Werror \
 	-Wno-error=unused-variable \
+	-Wno-override-init \
 	-Wshadow \
 	-Wformat=2 \
 	-Wundef

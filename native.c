@@ -7,12 +7,10 @@
 #include <arpa/inet.h>
 #include <sys/fcntl.h>
 
-#include <openssl/evp.h>
-
 #include "error.h"
 #include "native.h"
 #include "protocol.h"
-#include "hex.h"
+#include "storage.h"
 
 typedef enum parser_state {
   READING_IDLE,
@@ -30,12 +28,8 @@ typedef struct binary_context {
   parser_state_t parser_state;
   emitter_state_t emitter_state;
   uint32_t chunk_size;
+  storage_context_t storage;
   uint8_t prefix_length;
-  int write_fd;
-  char temp_filename[7];
-  EVP_MD_CTX digest;
-  uint8_t digest_value[EVP_MAX_MD_SIZE];
-  uint32_t digest_length;
 } binary_context_t;
 
 void *
@@ -45,7 +39,7 @@ binary_init(void)
 
   context = calloc(1, (sizeof (binary_context_t)));
 
-  context->write_fd = -1;
+  context->storage.write_fd = -1;
   context->parser_state = READING_IDLE;
   context->emitter_state = WRITING_DIGEST;
 
@@ -73,13 +67,7 @@ binary_read(void *const buf_head, size_t buf_size,
   while (1) {
     switch (context->parser_state) {
     case READING_IDLE:
-      memcpy(context->temp_filename, "XXXXXX", (sizeof (context->temp_filename)));
-      ret = mkostemp(context->temp_filename, O_CLOEXEC);
-      esprintf(ret, "mkostemp: %s", context->temp_filename);
-      context->write_fd = ret;
-
-      EVP_DigestInit_ex(&context->digest, EVP_sha256(), NULL);
-
+      storage_open_writer(&context->storage);
       context->parser_state = READING_PREFIX_LENGTH;
       break;
     case READING_PREFIX_LENGTH:
@@ -98,33 +86,7 @@ binary_read(void *const buf_head, size_t buf_size,
       context->parser_state = READING_CHUNK_SIZE;
       break;
     case READING_CLOSING_FILE:
-      {
-        EVP_DigestFinal_ex(&context->digest, context->digest_value, &context->digest_length);
-
-        char hex_digest[context->digest_length * 2 + 1];
-        hex_digest[context->digest_length * 2] = '\0';
-        uint8_to_hex(hex_digest, context->digest_value, context->digest_length);
-
-        assert(context->write_fd > 0);
-        ret = rename(context->temp_filename, hex_digest);
-        esprintf(ret, "rename: %s -> %s", context->temp_filename, hex_digest);
-
-        assert(context->digest_length * 2 > context->prefix_length);
-        if (context->prefix_length != 0) {
-          char prefix[context->prefix_length + 1];
-          prefix[context->prefix_length] = '\0';
-          memcpy(prefix, hex_digest, context->prefix_length);
-          ret = unlink(prefix);
-          assert(!(ret < 0) || errno == ENOENT);
-          ret = symlink(hex_digest, prefix);
-          esprintf(ret, "symlink: %s -> %s", prefix, hex_digest);
-        }
-
-        ret = close(context->write_fd);
-        esprintf(ret, "close: %d", context->write_fd);
-        context->write_fd = -1;
-      }
-
+      storage_close_writer(&context->storage, context->prefix_length);
       context->parser_state = READING_IDLE;
       *protocol_state = PROTOCOL_WRITING;
       goto handled_buf;
@@ -148,11 +110,7 @@ binary_read(void *const buf_head, size_t buf_size,
       if (!((write_length = min(_buf_length(), context->chunk_size)) > 0))
         goto handled_buf;
 
-      ret = EVP_DigestUpdate(&context->digest, buf, write_length);
-      assert(ret == 1 && "EVP_DigestUpdate");
-
-      ret = write(context->write_fd, buf, write_length);
-      esprintf(ret, "write: %d", context->write_fd);
+      ret = storage_write(&context->storage, buf, write_length);
 
       context->chunk_size -= ret;
       buf += ret;
@@ -180,13 +138,13 @@ binary_write(void *const buf_head, size_t buf_size,
   while (1) {
     switch (context->emitter_state) {
     case WRITING_DIGEST:
-      if (_buf_length() < (sizeof (uint32_t)) + context->digest_length)
+      if (_buf_length() < (sizeof (uint32_t)) + context->storage.digest_length)
         goto handled_buf;
 
-      *(uint32_t*)buf = htonl(context->digest_length);
+      *(uint32_t*)buf = htonl(context->storage.digest_length);
       buf += (sizeof (uint32_t));
-      memcpy(buf, context->digest_value, context->digest_length);
-      buf += context->digest_length;
+      memcpy(buf, context->storage.digest_value, context->storage.digest_length);
+      buf += context->storage.digest_length;
 
       context->emitter_state = WRITING_DIGEST;
       *protocol_state = PROTOCOL_READING;
@@ -205,9 +163,9 @@ binary_terminate(void *ptr)
 {
   binary_context_t *context = (binary_context_t *)ptr;
 
-  if (context->write_fd != -1) {
-    unlink(context->temp_filename);
-    close(context->write_fd);
+  if (context->storage.write_fd != -1) {
+    unlink(context->storage.temp_filename);
+    close(context->storage.write_fd);
   }
 
   free(context);
