@@ -174,6 +174,7 @@ binary_read(void *const buf_head, size_t buf_size,
 
       context->parser_state = READING_IDLE;
       *protocol_state = PROTOCOL_WRITING;
+      goto handled_buf;
       break;
     case READING_CHUNK_SIZE:
       if (_buf_length() < (sizeof (uint32_t)))
