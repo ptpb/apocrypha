@@ -309,6 +309,9 @@ main(void)
   ret = sigaction(SIGHUP, &sa, NULL);
   esprintf(ret, "sigaction: SIGHUP");
 
+  ret = sigaction(SIGPIPE, &(struct sigaction){.sa_handler = SIG_IGN, .sa_flags = 0}, NULL);
+  esprintf(ret, "sigation: SIGPIPE");
+
   //
 
   int client_fd;
