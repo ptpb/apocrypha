@@ -455,6 +455,7 @@ http_read(void *const buf_head, size_t buf_size,
           if (context->length_mode != LENGTH_MODE_NONE)
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
+          context->fixed.read = 0;
           valid = mem_decimal_uint64(value, end - value, &context->fixed.length);
           if (valid < 0)
             // rfc7320: [if] single Content-Length header field [has] an invalid
