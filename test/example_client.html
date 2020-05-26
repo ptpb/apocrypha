@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang=en>
+  <head>
+    <meta charset="utf-8">
+  </head>
+  <body>
+    <form id="form" method="POST" enctype="multipart/form-data">
+      <fieldset>
+        <label for="file">Choose file to upload</label>
+        <input type="file" id="file" name="file">
+        <input type="submit">
+      </fieldset>
+      <ul id="output">
+      </ul>
+    </form>
+    <script>
+      function submit(file, output, event) {
+          event.preventDefault()
+          console.log(file.files)
+
+          const request = new XMLHttpRequest()
+          const url = "https://ptpb.io:667/"
+          //const url = "https://localhost:8000/"
+          request.open("POST", url, true)
+          request.overrideMimeType("application/octet-stream")
+          request.onreadystatechange = function (event) {
+              if (request.readyState === request.DONE) {
+                  const hex_digest = request.response
+                  var ext = file.files[0].name.split(".").slice(-1)
+                  if (ext === file.files[0].name)
+                      ext = ""
+                  else
+                      ext = "." + ext
+                  const li = document.createElement("li")
+                  const pre = document.createElement("pre")
+                  const a = document.createElement("a")
+                  a.style.display = "block"
+                  const a_s = document.createElement("a")
+                  a_s.style.display = "block"
+                  pre.innerText = file.files[0].name
+                  a.href = url + hex_digest + ext
+                  a.innerText = a.href
+                  a_s.href = url + hex_digest.slice(0, 6) + ext
+                  a_s.innerText = a_s.href
+                  li.appendChild(pre)
+                  li.appendChild(a)
+                  li.appendChild(a_s)
+                  output.appendChild(li)
+              }
+          };
+          request.send(file.files[0])
+      }
+
+      document.addEventListener("DOMContentLoaded", function() {
+          const form = document.getElementById("form")
+          const file = document.getElementById("file")
+          const output = document.getElementById("output")
+          form.addEventListener("submit", function (event) {
+              return submit(file, output, event)
+          })
+      });
+    </script>
+  </body>
+</html>
