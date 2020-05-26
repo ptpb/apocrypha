@@ -100,6 +100,11 @@ typedef enum length_mode {
   LENGTH_MODE_CHUNKED,
 } length_mode_t;
 
+typedef enum cors_mode {
+  CORS_NONE = 0,
+  CORS_PREFLIGHT_COMPLETE,
+} cors_mode_t;
+
 typedef enum emitter_state {
   EMITTER_INVALID = 0,
   EMITTER_RESOLVE_URI,
@@ -149,9 +154,9 @@ static header_string_t header_strings[HEADER_LAST] = {
   [HEADER_CONTENT_TYPE] = {"content-type: ", 14},
 };
 
-static header_t method_headers[METHOD_LAST][4] = {
+static header_t method_headers[METHOD_LAST][5] = {
   [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_INVALID},
-  [METHOD_POST] = {HEADER_TRANSFER_ENCODING, HEADER_INVALID},
+  [METHOD_POST] = {HEADER_TRANSFER_ENCODING, HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
   [METHOD_OPTIONS] = {HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
 };
 
@@ -174,6 +179,7 @@ typedef struct http_context {
   method_t method;
   header_t current_header;
   length_mode_t length_mode;
+  cors_mode_t cors_mode;
   union {
     struct {
       uint64_t length;
@@ -374,12 +380,17 @@ http_read(void *const buf_head, size_t buf_size,
     case PARSING_REQUEST_METHOD:
       {
         size_t method_length = ret - buf;
+        *(uint8_t *)ret = '\0';
+        fprintf(stderr, "method: `%s`\n", (char *)buf);
         if (3 == method_length && memcmp(buf, "GET", 3) == 0)
           context->method = METHOD_GET;
         else if (4 == method_length && memcmp(buf, "POST", 4) == 0)
           context->method = METHOD_POST;
-        else if (7 == method_length && memcmp(buf, "OPTIONS", 7) == 0)
+        else if (7 == method_length && memcmp(buf, "OPTIONS", 7) == 0) {
           context->method = METHOD_OPTIONS;
+          // also assume this is a preflight request
+          context->cors_mode = CORS_PREFLIGHT_COMPLETE;
+        }
         else {
           *(char *)ret = '\0';
           fprintf(stderr, "unsupported method: %s\n", (char *)buf);
@@ -607,10 +618,13 @@ http_write(void *const buf_head, size_t buf_size,
 
         header_string_t header_string = header_strings[header];
         switch (header) {
-        case HEADER_TRANSFER_ENCODING:
         case HEADER_ACAO:
         case HEADER_ACAH:
         case HEADER_ACAM:
+          if (context->method != METHOD_OPTIONS &&
+              context->cors_mode != CORS_PREFLIGHT_COMPLETE)
+            goto next_header; // fall through
+        case HEADER_TRANSFER_ENCODING:
           if (_buf_length() < header_string.length + 2)
             goto handled_buf;
 
