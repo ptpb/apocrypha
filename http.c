@@ -69,22 +69,29 @@ transitions[PARSER_STATE_LAST][TERMINATOR_LAST] = {
 typedef enum method {
   METHOD_INVALID = 0,
   METHOD_GET,
-  METHOD_HEAD,
   METHOD_POST,
+  METHOD_OPTIONS,
+  METHOD_LAST
 } method_t;
 
 typedef enum status_code {
   STATUS_UNSET = 0,
   STATUS_OK,
+  STATUS_NO_CONTENT,
   STATUS_BAD_REQUEST,
   STATUS_NOT_FOUND,
   STATUS_CODE_LAST
 } status_code_t;
 
 typedef enum header {
-  HEADER_DONTCARE = 0,
+  HEADER_INVALID = 0,
   HEADER_CONTENT_LENGTH,
+  HEADER_CONTENT_TYPE,
   HEADER_TRANSFER_ENCODING,
+  HEADER_ACAO,
+  HEADER_ACAH,
+  HEADER_ACAM,
+  HEADER_LAST,
 } header_t;
 
 typedef enum length_mode {
@@ -97,8 +104,7 @@ typedef enum emitter_state {
   EMITTER_INVALID = 0,
   EMITTER_RESOLVE_URI,
   EMITTING_STATUS_LINE,
-  EMITTING_TE_HEADER,
-  EMITTING_CT_HEADER,
+  EMITTING_HEADERS,
   EMITTING_LAST_HEADER,
   EMITTING_BODY,
   EMITTING_CHUNKED_EOF,
@@ -108,33 +114,13 @@ typedef enum emitter_state {
 #define BAD 0
 #define OK 1
 
-static emitter_state_t emitter_transitions[EMITTER_STATE_LAST][2] = {
-  [EMITTER_RESOLVE_URI] = {
-    [BAD] = EMITTING_STATUS_LINE,
-    [OK] = EMITTING_STATUS_LINE,
-  },
-  [EMITTING_STATUS_LINE] = {
-    [BAD] = EMITTING_TE_HEADER,
-    [OK] = EMITTING_TE_HEADER,
-  },
-  [EMITTING_TE_HEADER] = {
-    [BAD] = EMITTING_LAST_HEADER,
-    [OK] = EMITTING_CT_HEADER,
-  },
-  [EMITTING_CT_HEADER] = {
-    [OK] = EMITTING_LAST_HEADER,
-  },
-  [EMITTING_LAST_HEADER] = {
-    [BAD] = EMITTING_CHUNKED_EOF,
-    [OK] = EMITTING_BODY,
-  },
-  [EMITTING_BODY] = {
-    [OK] = EMITTING_CHUNKED_EOF,
-  },
-  [EMITTING_CHUNKED_EOF] = {
-    [OK] = EMITTER_RESOLVE_URI,
-    [BAD] = EMITTER_RESOLVE_URI,
-  },
+static emitter_state_t emitter_transitions[EMITTER_STATE_LAST] = {
+  [EMITTER_RESOLVE_URI] = EMITTING_STATUS_LINE,
+  [EMITTING_STATUS_LINE] = EMITTING_HEADERS,
+  [EMITTING_HEADERS] = EMITTING_LAST_HEADER,
+  [EMITTING_LAST_HEADER] = EMITTING_BODY,
+  [EMITTING_BODY] = EMITTING_CHUNKED_EOF,
+  [EMITTING_CHUNKED_EOF] = EMITTER_RESOLVE_URI,
 };
 
 #define STATUS_CODE_SIZE 3
@@ -142,16 +128,32 @@ static emitter_state_t emitter_transitions[EMITTER_STATE_LAST][2] = {
 static char
 protocol_code[STATUS_CODE_LAST][STATUS_CODE_SIZE] = {
   [STATUS_OK] = "200",
+  [STATUS_NO_CONTENT] = "204",
   [STATUS_BAD_REQUEST] = "400",
   [STATUS_NOT_FOUND] = "404",
 };
 
 static char http_version[] = "HTTP/1.1";
 #define HTTP_VERSION_SIZE ((sizeof (http_version)) - 1)
-static char http_te_header[] = "transfer-encoding: chunked";
-#define HTTP_TE_HEADER_SIZE ((sizeof (http_te_header)) - 1)
-static char http_ct_header[] = "content-type: ";
-#define HTTP_CT_HEADER_SIZE ((sizeof (http_ct_header)) - 1)
+
+typedef struct header_string {
+  void *buf;
+  unsigned int length;
+} header_string_t;
+
+static header_string_t header_strings[HEADER_LAST] = {
+  [HEADER_TRANSFER_ENCODING] = {"transfer-encoding: chunked", 26},
+  [HEADER_ACAO] = {"access-control-allow-origin: *", 30},
+  [HEADER_ACAH] = {"access-control-allow-headers: *", 31},
+  [HEADER_ACAM] = {"access-control-allow-methods: *", 31},
+  [HEADER_CONTENT_TYPE] = {"content-type: ", 14},
+};
+
+static header_t method_headers[METHOD_LAST][4] = {
+  [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_INVALID},
+  [METHOD_POST] = {HEADER_TRANSFER_ENCODING, HEADER_INVALID},
+  [METHOD_OPTIONS] = {HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
+};
 
 #define STATUS_LINE_LENGTH (HTTP_VERSION_SIZE + 1 + STATUS_CODE_SIZE + 3)
 
@@ -161,6 +163,7 @@ static char http_ct_header[] = "content-type: ";
 typedef struct http_context {
   struct {
     emitter_state_t state;
+    uint8_t header_index;
     int read_fd;
   } emitter;
   struct {
@@ -195,13 +198,14 @@ http_context_init(http_context_t *context)
   context->emitter.state = EMITTER_RESOLVE_URI;
   context->parser.state = PARSING_REQUEST_METHOD;
   context->parser.storage_state = PARSER_STORAGE_OPENING;
-  context->current_header = HEADER_DONTCARE;
+  context->current_header = HEADER_INVALID;
   context->length_mode = LENGTH_MODE_NONE;
 
   // clobbering read_fd here assumes emitter never has a recoverable
   // failure. This is currently true.
   context->parser.storage.write_fd = -1;
   context->emitter.read_fd = -1;
+  context->emitter.header_index = 0;
 }
 
 void *
@@ -245,7 +249,7 @@ parse_header_name(void *buf, size_t len)
     if (entry->length == len && memcmp(entry->string, buf, len) == 0)
       return entry->header;
   }
-  return HEADER_DONTCARE;
+  return HEADER_INVALID;
 }
 
 #define min(a, b)               \
@@ -364,7 +368,7 @@ http_read(void *const buf_head, size_t buf_size,
       }
     }
 
-    assert(ret != NULL);
+    assert(ret != NULL || context->parser.state == PARSING_BODY);
 
     switch (context->parser.state) {
     case PARSING_REQUEST_METHOD:
@@ -374,6 +378,8 @@ http_read(void *const buf_head, size_t buf_size,
           context->method = METHOD_GET;
         else if (4 == method_length && memcmp(buf, "POST", 4) == 0)
           context->method = METHOD_POST;
+        else if (7 == method_length && memcmp(buf, "OPTIONS", 7) == 0)
+          context->method = METHOD_OPTIONS;
         else {
           *(char *)ret = '\0';
           fprintf(stderr, "unsupported method: %s\n", (char *)buf);
@@ -415,8 +421,9 @@ http_read(void *const buf_head, size_t buf_size,
       }
       break;
     case PARSING_HEADER_VALUE:
-      if (context->current_header == HEADER_DONTCARE)
-        // don't try to parse DONTCARE headers at all
+      if (context->current_header == HEADER_INVALID)
+        // "INVALID" headers aren't really invalid; we just aren't concerned
+        // with parsing them
         break;
       {
         uint8_t *value, *end;
@@ -429,7 +436,8 @@ http_read(void *const buf_head, size_t buf_size,
           if (context->length_mode != LENGTH_MODE_NONE)
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
-          assert(0 && "te parsing not implemented");
+          // implement
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
           context->length_mode = LENGTH_MODE_CHUNKED;
           break;
         case HEADER_CONTENT_LENGTH:
@@ -445,8 +453,10 @@ http_read(void *const buf_head, size_t buf_size,
 
           context->length_mode = LENGTH_MODE_FIXED;
           break;
-        case HEADER_DONTCARE:
+        case HEADER_INVALID:
           assert(0 && "unreachable");
+          break;
+        default:
           break;
         }
       }
@@ -456,6 +466,8 @@ http_read(void *const buf_head, size_t buf_size,
       case LENGTH_MODE_NONE:
         if (context->method == METHOD_GET)
           parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
+        else if (context->method == METHOD_OPTIONS)
+          parser_stop(STATUS_NO_CONTENT, PROTOCOL_WRITING);
         else
           parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
         break;
@@ -481,10 +493,10 @@ http_read(void *const buf_head, size_t buf_size,
             goto handled_buf;
         } else
           parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
-
         break;
       case LENGTH_MODE_CHUNKED:
-        assert(0 && "not implemented");
+        // implement
+        parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
         break;
       }
       assert(0 && "unreachable: implicit body state transition");
@@ -502,7 +514,7 @@ http_read(void *const buf_head, size_t buf_size,
   return (uint8_t *)buf - (uint8_t *)buf_head;
 }
 
-#define _buf_length() (buf_size - ((uint8_t *)buf - (uint8_t *)buf_head))
+#define _buf_length() ((size_t)(buf_size - ((uint8_t *)buf - (uint8_t *)buf_head)))
 
 static const char *
 find_mime_type(const char *ext)
@@ -583,29 +595,52 @@ http_write(void *const buf_head, size_t buf_size,
       *buf++ = '\r';
       *buf++ = '\n';
       break;
-    case EMITTING_TE_HEADER:
-      if (_buf_length() < HTTP_TE_HEADER_SIZE + 2)
-        goto handled_buf;
+    case EMITTING_HEADERS:
+      next_header:
+      {
+        header_t *headers = method_headers[context->method];
+        assert(headers != NULL);
+        header_t header = headers[context->emitter.header_index++];
 
-      memcpy(buf, http_te_header, HTTP_TE_HEADER_SIZE);
-      buf += HTTP_TE_HEADER_SIZE;
-      *buf++ = '\r';
-      *buf++ = '\n';
-      break;
-    case EMITTING_CT_HEADER:
-      if (context->mime_type == NULL)
-        break;
+        if (header == HEADER_INVALID)
+          break;
 
-      size_t mime_length = strlen(context->mime_type);
-      if (_buf_length() < HTTP_CT_HEADER_SIZE + 2 + mime_length)
-        goto handled_buf;
+        header_string_t header_string = header_strings[header];
+        switch (header) {
+        case HEADER_TRANSFER_ENCODING:
+        case HEADER_ACAO:
+        case HEADER_ACAH:
+        case HEADER_ACAM:
+          if (_buf_length() < header_string.length + 2)
+            goto handled_buf;
 
-      memcpy(buf, http_ct_header, HTTP_CT_HEADER_SIZE);
-      buf += HTTP_CT_HEADER_SIZE;
-      memcpy(buf, context->mime_type, mime_length);
-      buf += mime_length;
-      *buf++ = '\r';
-      *buf++ = '\n';
+          memcpy(buf, header_string.buf, header_string.length);
+          buf += header_string.length;
+          *buf++ = '\r';
+          *buf++ = '\n';
+          break;
+        case HEADER_CONTENT_TYPE:
+          if (context->mime_type == NULL)
+            break;
+
+          size_t mime_length = strlen(context->mime_type);
+          if (_buf_length() < header_string.length + 2 + mime_length)
+            goto handled_buf;
+
+          memcpy(buf, header_string.buf, header_string.length);
+          buf += header_string.length;
+          memcpy(buf, context->mime_type, mime_length);
+          buf += mime_length;
+          *buf++ = '\r';
+          *buf++ = '\n';
+          break;
+        default:
+          // next emitter state
+          break;
+        }
+
+        goto next_header;
+      }
       break;
     case EMITTING_LAST_HEADER:
       if (_buf_length() < 2)
@@ -629,6 +664,9 @@ http_write(void *const buf_head, size_t buf_size,
           *buf++ = '\r';                 \
           *buf++ = '\n';                 \
         } while (0);
+
+      if (context->status_code != STATUS_OK)
+        break;
 
       switch (context->method) {
       case METHOD_GET:
@@ -667,7 +705,6 @@ http_write(void *const buf_head, size_t buf_size,
         }
         break;
       default:
-        assert(0 && "unreachable");
         break;
       }
       break;
@@ -686,7 +723,7 @@ http_write(void *const buf_head, size_t buf_size,
       break;
     }
 
-    context->emitter.state = emitter_transitions[context->emitter.state][context->status_code == STATUS_OK];
+    context->emitter.state = emitter_transitions[context->emitter.state];
     if (context->emitter.state == EMITTER_RESOLVE_URI) {
       // we are done, switch to PROTOCOL_READING
       *protocol_state = PROTOCOL_READING;
