@@ -12,5 +12,5 @@
 size_t
 uint8_to_base75(const void *buf, size_t len, void *out);
 
-size_t
+ssize_t
 base75_to_uint8(const void *buf, size_t len, void *out);

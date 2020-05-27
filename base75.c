@@ -57,7 +57,7 @@ uint8_to_base75(const void *buf, size_t len, void *out)
   return outi - (uint8_t *)out;
 }
 
-size_t
+ssize_t
 base75_to_uint8(const void *buf, size_t len, void *out)
 {
   const uint8_t *bufi = buf;
@@ -70,7 +70,10 @@ base75_to_uint8(const void *buf, size_t len, void *out)
 
     while ((block_index--) > 0) {
       num *= 75;
-      num += symbols_base75[*(bufi + block_index)];
+      uint8_t v = symbols_base75[*(bufi + block_index)];
+      if (v == INVALID_SYMBOL)
+        return -1;
+      num += v;
     }
 
     assert(num < 72057594037927936);

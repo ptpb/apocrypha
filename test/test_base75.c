@@ -49,7 +49,7 @@ test_base75(void)
   while (v->base256 != NULL) {
     uint8_t out75[base75_min_symbols(strlen(v->base256)) + 1];
     memset(out75, '\0', (sizeof (out75)));
-    size_t out75_len = uint8_to_base75(v->base256, strlen(v->base256), out75);
+    ssize_t out75_len = uint8_to_base75(v->base256, strlen(v->base256), out75);
 
     assert((sizeof (out75)) - 1 >= out75_len);
     assert(out75_len == strlen(v->base75));
@@ -57,7 +57,7 @@ test_base75(void)
 
     uint8_t out256[base75_min_length(strlen(v->base75)) + 1];
     memset(out256, '\0', (sizeof (out256)));
-    size_t out256_len = base75_to_uint8(v->base75, strlen(v->base75), out256);
+    ssize_t out256_len = base75_to_uint8(v->base75, strlen(v->base75), out256);
     assert((sizeof (out256)) - 1 >= out256_len);
     assert(strlen(out256) == strlen(v->base256));
     assert(memcmp(out256, v->base256, strlen(v->base256)) == 0);
@@ -65,10 +65,21 @@ test_base75(void)
   }
 }
 
+void
+test_invalid_base75()
+{
+  size_t out256_len;
+  uint8_t out256[base75_min_length(8)];
+  out256_len = base75_to_uint8("&'[](){}", 8, out256);
+
+  assert(out256_len == -1);
+}
+
 int
 main(void)
 {
   test_base75();
+  test_invalid_base75();
 
   printf("tests passed: %d failed: %d\n", tests_passed, tests_failed);
 
