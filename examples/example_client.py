@@ -21,8 +21,8 @@ with socket.create_connection((host, port)) as sock, \
     for filename in sys.argv[1:]:
         digest = hashlib.sha256()
 
-        # request a prefix length of 4
-        prefix_length = 4
+        # request a prefix length of 6
+        prefix_length = 6
         ssl_sock.write(struct.pack("!B", prefix_length))
 
         with open(filename, "rb") as f:
@@ -35,9 +35,8 @@ with socket.create_connection((host, port)) as sock, \
 
         remote_length, = struct.unpack("!L", ssl_sock.read(4))
         remote_value = ssl_sock.read(remote_length)
-        assert(len(remote_value) == remote_length)
         url = "https://" + host + ":" + str(http_port) + "/" \
-              + binascii.hexlify(remote_value).decode("utf-8")[:prefix_length]
+              + remote_value.decode("utf-8")
         print(filename, url)
 
         #print("  local: ", digest.hexdigest())

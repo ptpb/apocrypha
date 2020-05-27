@@ -169,11 +169,11 @@ typedef struct http_context {
   struct {
     emitter_state_t state;
     uint8_t header_index;
-    int read_fd;
+    storage_reader_t storage;
   } emitter;
   struct {
     parser_state_t state;
-    storage_context_t storage;
+    storage_writer_t storage;
     parser_storage_state_t storage_state;
   } parser;
   method_t method;
@@ -210,7 +210,7 @@ http_context_init(http_context_t *context)
   // clobbering read_fd here assumes emitter never has a recoverable
   // failure. This is currently true.
   context->parser.storage.write_fd = -1;
-  context->emitter.read_fd = -1;
+  context->emitter.storage.read_fd = -1;
   context->emitter.header_index = 0;
 }
 
@@ -264,7 +264,7 @@ parse_header_name(void *buf, size_t len)
     _a < _b ? _a : _b; })
 
 static size_t
-handle_body_storage(storage_context_t *storage,
+handle_body_storage(storage_writer_t *storage,
                     parser_storage_state_t *state,
                     void *const buf, size_t len)
 {
@@ -561,7 +561,7 @@ http_write(void *const buf_head, size_t buf_size,
       if (context->method != METHOD_GET)
         break;
 
-      context->emitter.read_fd = -1;
+      context->emitter.storage.read_fd = -1;
 
       if (context->status_code != STATUS_UNSET)
         // if the parser set an error, move to the next state without resolving a uri
@@ -576,7 +576,7 @@ http_write(void *const buf_head, size_t buf_size,
       {
         char *ext;
         // find an extension
-        ext = memrchr(context->uri + 1, '.', context->uri_length);
+        ext = memrchr(context->uri + 1, '.', context->uri_length - 1);
         if (ext == NULL)
           context->mime_type = NULL;
         else {
@@ -586,11 +586,10 @@ http_write(void *const buf_head, size_t buf_size,
         }
       }
 
-      ret = open(context->uri + 1, O_RDONLY);
+      ret = storage_open_reader(&context->emitter.storage, context->uri + 1, context->uri_length - 1);
       if (ret < 0)
         context->status_code = STATUS_NOT_FOUND;
       else {
-        context->emitter.read_fd = ret;
         context->status_code = STATUS_OK;
       }
       break;
@@ -689,15 +688,15 @@ http_write(void *const buf_head, size_t buf_size,
         if (_buf_length() < CHUNK_PAD_SIZE + 1)
           goto handled_buf;
 
-        assert(context->emitter.read_fd != -1);
-        ret = read(context->emitter.read_fd, buf + CHUNK_OFFSET,
+        assert(context->emitter.storage.read_fd != -1);
+        ret = read(context->emitter.storage.read_fd, buf + CHUNK_OFFSET,
                    _buf_length() - CHUNK_PAD_SIZE);
         esprintf(ret, "read");
         if (ret == 0) {
           // end of file
           fprintf(stderr, "eof\n");
-          ret = close(context->emitter.read_fd);
-          context->emitter.read_fd = -1;
+          ret = close(context->emitter.storage.read_fd);
+          context->emitter.storage.read_fd = -1;
           esprintf(ret, "close");
         } else {
           terminate_chunk(ret);
@@ -706,17 +705,14 @@ http_write(void *const buf_head, size_t buf_size,
         break;
       case METHOD_POST:
         {
-          uint64_t hex_len = context->parser.storage.digest_length * 2;
-
-          if (_buf_length() < CHUNK_PAD_SIZE + hex_len + 1)
+          if (_buf_length() < CHUNK_PAD_SIZE + context->parser.storage.name_length + 1)
             goto handled_buf;
 
           memcpy(buf + CHUNK_OFFSET,
-                 context->parser.storage.hex_digest,
-                 hex_len);
-          *(buf + CHUNK_OFFSET + hex_len) = '\n';
-          hex_len++;
-          terminate_chunk(hex_len);
+                 context->parser.storage.name,
+                 context->parser.storage.name_length);
+          *(buf + CHUNK_OFFSET + context->parser.storage.name_length) = '\n';
+          terminate_chunk(context->parser.storage.name_length + 1);
         }
         break;
       default:
@@ -757,8 +753,8 @@ http_terminate(void *ptr)
 {
   http_context_t *context = (http_context_t *)ptr;
 
-  if (context->emitter.read_fd != -1)
-    close(context->emitter.read_fd);
+  if (context->emitter.storage.read_fd != -1)
+    close(context->emitter.storage.read_fd);
 
   if (context->parser.storage.write_fd != -1)
     close(context->parser.storage.write_fd);

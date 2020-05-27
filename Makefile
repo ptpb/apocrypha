@@ -1,7 +1,7 @@
 include config.mk
 
 DEP = $(wildcard *.h)
-SRC = main.c native.c http.c hex.c token.c storage.c
+SRC = main.c native.c http.c hex.c token.c storage.c base75.c
 OBJ = $(SRC:.c=.o)
 NAME = apocrypha
 

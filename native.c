@@ -28,7 +28,7 @@ typedef struct binary_context {
   parser_state_t parser_state;
   emitter_state_t emitter_state;
   uint32_t chunk_size;
-  storage_context_t storage;
+  storage_writer_t storage;
   uint8_t prefix_length;
 } binary_context_t;
 
@@ -76,8 +76,7 @@ binary_read(void *const buf_head, size_t buf_size,
 
       context->prefix_length = *(uint8_t *)buf++;
 
-      if (context->prefix_length != 0 &&
-          (context->prefix_length < 3 || context->prefix_length > 63)) {
+      if (context->prefix_length < 3 || context->prefix_length > 42) {
         fprintf(stderr, "invalid prefix length: %d", context->prefix_length);
         *protocol_state = PROTOCOL_SHUTDOWN;
         goto handled_buf;
@@ -138,13 +137,13 @@ binary_write(void *const buf_head, size_t buf_size,
   while (1) {
     switch (context->emitter_state) {
     case WRITING_DIGEST:
-      if (_buf_length() < (sizeof (uint32_t)) + context->storage.digest_length)
+      if (_buf_length() < (sizeof (uint32_t)) + context->storage.name_length)
         goto handled_buf;
 
       *(uint32_t*)buf = htonl(context->storage.digest_length);
       buf += (sizeof (uint32_t));
-      memcpy(buf, context->storage.digest_value, context->storage.digest_length);
-      buf += context->storage.digest_length;
+      memcpy(buf, context->storage.name, context->storage.name_length);
+      buf += context->storage.name_length;
 
       context->emitter_state = WRITING_DIGEST;
       *protocol_state = PROTOCOL_READING;
