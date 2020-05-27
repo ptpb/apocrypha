@@ -711,8 +711,7 @@ http_write(void *const buf_head, size_t buf_size,
           memcpy(buf + CHUNK_OFFSET,
                  context->parser.storage.name,
                  context->parser.storage.name_length);
-          *(buf + CHUNK_OFFSET + context->parser.storage.name_length) = '\n';
-          terminate_chunk(context->parser.storage.name_length + 1);
+          terminate_chunk(context->parser.storage.name_length);
         }
         break;
       default:
