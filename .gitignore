@@ -1,3 +1,4 @@
+*.out
 apocrypha
 *.o
 vgcore.*
