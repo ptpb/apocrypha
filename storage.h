@@ -23,6 +23,7 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length);
 
 typedef struct storage_reader {
   int read_fd;
+  size_t size;
 } storage_reader_t;
 
 int

@@ -8,4 +8,7 @@ void *
 mem_rnows(void *const buf, const size_t len);
 
 int
-mem_decimal_uint64(void *const buf, const size_t len, uint64_t *value);
+base10_to_uint64(const void *const buf, uint64_t *num, const size_t len);
+
+size_t
+uint64_to_base10(void *buf, uint64_t num, const size_t len);

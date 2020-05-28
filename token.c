@@ -117,7 +117,7 @@ mem_rnows(void *const buf, const size_t len)
   return bufi;
 }
 
-static uint8_t decimal_chars[256] = {
+static uint8_t base10_chars[256] = {
   // s = "  ['{}'] = {},"
   // for i in string.digits:
   //   print(s.format(i, i))
@@ -142,11 +142,11 @@ static uint64_t _pow10[MAX_POW] = {
 };
 
 int
-mem_decimal_uint64(void *const buf, const size_t len, uint64_t *value)
+base10_to_uint64(const void *const buf, uint64_t *num, const size_t len)
 {
   // this function has incorrect behavior for values between
   // 2^64 and 10^20
-  uint64_t v = 0;
+  uint64_t n = 0;
   size_t index = 0;
   uint8_t d;
 
@@ -155,17 +155,35 @@ mem_decimal_uint64(void *const buf, const size_t len, uint64_t *value)
     return -1;
 
   while (index < len) {
-    switch (d = decimal_chars[((uint8_t *)buf)[len - index - 1]]) {
+    switch (d = base10_chars[((uint8_t *)buf)[len - index - 1]]) {
     case 255:
       return -1;
     default:
-      v += d * _pow10[index];
+      n += d * _pow10[index];
       break;
     }
     index++;
   }
 
-  *value = v;
+  *num = n;
 
   return 0;
+}
+
+static uint8_t base10_symbols[10] = "0123456789";
+
+size_t
+uint64_to_base10(void *dst, uint64_t num, const size_t len)
+{
+  size_t n = len;
+
+  if (len == 0)
+    return 0;
+
+  do {
+    *(uint8_t *)(dst + --n) = base10_symbols[num % 10];
+    num /= 10;
+  } while (n > 0 && num != 0);
+
+  return n;
 }

@@ -152,10 +152,11 @@ static header_string_t header_strings[HEADER_LAST] = {
   [HEADER_ACAH] = {"access-control-allow-headers: *", 31},
   [HEADER_ACAM] = {"access-control-allow-methods: *", 31},
   [HEADER_CONTENT_TYPE] = {"content-type: ", 14},
+  [HEADER_CONTENT_LENGTH] = {"content-length: ", 16},
 };
 
 static header_t method_headers[METHOD_LAST][5] = {
-  [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_INVALID},
+  [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_CONTENT_LENGTH, HEADER_INVALID},
   [METHOD_POST] = {HEADER_TRANSFER_ENCODING, HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
   [METHOD_OPTIONS] = {HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
 };
@@ -170,15 +171,16 @@ typedef struct http_context {
     emitter_state_t state;
     uint8_t header_index;
     storage_reader_t storage;
+    length_mode_t length_mode;
   } emitter;
   struct {
     parser_state_t state;
     storage_writer_t storage;
     parser_storage_state_t storage_state;
+    length_mode_t length_mode;
   } parser;
   method_t method;
   header_t current_header;
-  length_mode_t length_mode;
   cors_mode_t cors_mode;
   union {
     struct {
@@ -205,7 +207,9 @@ http_context_init(http_context_t *context)
   context->parser.state = PARSING_REQUEST_METHOD;
   context->parser.storage_state = PARSER_STORAGE_OPENING;
   context->current_header = HEADER_INVALID;
-  context->length_mode = LENGTH_MODE_NONE;
+
+  context->parser.length_mode = LENGTH_MODE_NONE;
+  context->emitter.length_mode = LENGTH_MODE_CHUNKED;
 
   // clobbering read_fd here assumes emitter never has a recoverable
   // failure. This is currently true.
@@ -424,6 +428,8 @@ http_read(void *const buf_head, size_t buf_size,
         break;
       case PARSING_HEADER_VALUE:
         // we have a header name
+        //*(char *)ret = '\0';
+        //fprintf(stderr,"header: `%s` = ", (char*)buf);
         context->current_header = parse_header_name(buf, ret - buf);
         break;
       default:
@@ -432,6 +438,9 @@ http_read(void *const buf_head, size_t buf_size,
       }
       break;
     case PARSING_HEADER_VALUE:
+      //*(char *)ret = '\0';
+      //fprintf(stderr, "`%s`\n", (char*)buf);
+
       if (context->current_header == HEADER_INVALID)
         // "INVALID" headers aren't really invalid; we just aren't concerned
         // with parsing them
@@ -444,26 +453,26 @@ http_read(void *const buf_head, size_t buf_size,
 
         switch (context->current_header) {
         case HEADER_TRANSFER_ENCODING:
-          if (context->length_mode != LENGTH_MODE_NONE)
+          if (context->parser.length_mode != LENGTH_MODE_NONE)
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
           // implement
           parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
-          context->length_mode = LENGTH_MODE_CHUNKED;
+          context->parser.length_mode = LENGTH_MODE_CHUNKED;
           break;
         case HEADER_CONTENT_LENGTH:
-          if (context->length_mode != LENGTH_MODE_NONE)
+          if (context->parser.length_mode != LENGTH_MODE_NONE)
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
           context->fixed.read = 0;
-          valid = mem_decimal_uint64(value, end - value, &context->fixed.length);
+          valid = base10_to_uint64(value, &context->fixed.length, end - value);
           if (valid < 0)
             // rfc7320: [if] single Content-Length header field [has] an invalid
             // value, then the message framing is invalid and the recipient MUST
             // treat it as an unrecoverable error
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
-          context->length_mode = LENGTH_MODE_FIXED;
+          context->parser.length_mode = LENGTH_MODE_FIXED;
           break;
         case HEADER_INVALID:
           assert(0 && "unreachable");
@@ -474,7 +483,7 @@ http_read(void *const buf_head, size_t buf_size,
       }
       break;
     case PARSING_BODY:
-      switch (context->length_mode) {
+      switch (context->parser.length_mode) {
       case LENGTH_MODE_NONE:
         if (context->method == METHOD_GET)
           parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
@@ -591,6 +600,7 @@ http_write(void *const buf_head, size_t buf_size,
         context->status_code = STATUS_NOT_FOUND;
       else {
         context->status_code = STATUS_OK;
+        context->emitter.length_mode = LENGTH_MODE_FIXED;
       }
       break;
     case EMITTING_STATUS_LINE:
@@ -623,13 +633,41 @@ http_write(void *const buf_head, size_t buf_size,
         case HEADER_ACAM:
           if (context->method != METHOD_OPTIONS &&
               context->cors_mode != CORS_PREFLIGHT_COMPLETE)
-            goto next_header; // fall through
-        case HEADER_TRANSFER_ENCODING:
+            goto next_header;
           if (_buf_length() < header_string.length + 2)
             goto handled_buf;
 
           memcpy(buf, header_string.buf, header_string.length);
           buf += header_string.length;
+          *buf++ = '\r';
+          *buf++ = '\n';
+          break;
+        case HEADER_TRANSFER_ENCODING:
+          if (context->emitter.length_mode != LENGTH_MODE_CHUNKED)
+            goto next_header;
+          if (_buf_length() < header_string.length + 2)
+            goto handled_buf;
+
+          memcpy(buf, header_string.buf, header_string.length);
+          buf += header_string.length;
+          *buf++ = '\r';
+          *buf++ = '\n';
+          break;
+        case HEADER_CONTENT_LENGTH:
+          if (context->emitter.length_mode != LENGTH_MODE_FIXED)
+            goto next_header;
+          if (_buf_length() < header_string.length + 2 + 20)
+            goto handled_buf;
+
+          memcpy(buf, header_string.buf, header_string.length);
+          buf += header_string.length;
+
+          {
+            size_t offset = uint64_to_base10(buf, context->emitter.storage.size, 20);
+            memmove(buf, buf + offset, 20 - offset);
+            buf += 20 - offset;
+          }
+
           *buf++ = '\r';
           *buf++ = '\n';
           break;
@@ -664,19 +702,23 @@ http_write(void *const buf_head, size_t buf_size,
       *buf++ = '\n';
       break;
     case EMITTING_BODY:
-      #define CHUNK_PAD_SIZE (4 + 2 + 2)
-      #define CHUNK_OFFSET (4 + 2)
+      #define CHUNK_PAD_SIZE (context->emitter.length_mode == LENGTH_MODE_CHUNKED ? (4 + 2 + 2) : 0)
+      #define CHUNK_OFFSET (context->emitter.length_mode == LENGTH_MODE_CHUNKED ? (4 + 2) : 0)
 
-      #define terminate_chunk(_size)     \
-        do {                             \
-          assert(_size < 0xffff);        \
-          uint16_to_hex(buf, &_size, 1); \
-          buf += 4;                      \
-          *buf++ = '\r';                 \
-          *buf++ = '\n';                 \
-          buf += _size;                  \
-          *buf++ = '\r';                 \
-          *buf++ = '\n';                 \
+      #define terminate_chunk(_size)                               \
+        do {                                                       \
+          if (context->emitter.length_mode != LENGTH_MODE_CHUNKED) \
+            buf += _size;                                          \
+          else {                                                   \
+            assert(_size < 0xffff);                                \
+            uint16_to_hex(buf, &_size, 1);                         \
+            buf += 4;                                              \
+            *buf++ = '\r';                                         \
+            *buf++ = '\n';                                         \
+            buf += _size;                                          \
+            *buf++ = '\r';                                         \
+            *buf++ = '\n';                                         \
+          }                                                        \
         } while (0);
 
       if (context->status_code != STATUS_OK)
@@ -719,6 +761,9 @@ http_write(void *const buf_head, size_t buf_size,
       }
       break;
     case EMITTING_CHUNKED_EOF:
+      if (context->emitter.length_mode != LENGTH_MODE_CHUNKED)
+        break;
+
       if (_buf_length() < 5)
         goto handled_buf;
 

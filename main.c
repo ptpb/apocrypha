@@ -119,8 +119,10 @@ handle_client_write(client_t *client)
     protocol_ret = (*client->protocol->write)(client->write_buf + client->write_buf_index,
                                               (sizeof (client->write_buf)) - client->write_buf_index,
                                               client->context, &client->protocol_state);
-    assert(protocol_ret != 0);
     client->write_buf_index += protocol_ret;
+
+    if (protocol_ret == 0 && client->write_buf_index == 0)
+      return;
   }
 
   assert(client->write_buf_index != 0);

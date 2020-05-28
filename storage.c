@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <sys/fcntl.h>
+#include <sys/stat.h>
 #include <openssl/evp.h>
 
 #include "error.h"
@@ -99,6 +100,13 @@ storage_open_reader(storage_reader_t *reader, const char *name, uint32_t name_le
 
   assert(reader->read_fd == -1);
   reader->read_fd = ret;
+
+  struct stat sb;
+  ret = fstat(reader->read_fd, &sb);
+  if (ret < 0)
+    return ret;
+
+  reader->size = sb.st_size;
 
   return 0;
 }

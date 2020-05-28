@@ -4,3 +4,5 @@ apocrypha
 vgcore.*
 *.pem
 objects/
+test/test_*
+!test/test_*.c

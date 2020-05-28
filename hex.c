@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-static char hex_chars[] = {
+static char base16_symbols[] = {
   [0x0] = '0',
   [0x1] = '1',
   [0x2] = '2',
@@ -27,8 +27,8 @@ uint8_to_hex(void *dst, const void *src, size_t n)
   size_t i;
 
   for (i = 0; i < n; i++) {
-    *(uint8_t*)dst++ = hex_chars[((uint8_t*)src)[i] >> 4 & 0xf];
-    *(uint8_t*)dst++ = hex_chars[((uint8_t*)src)[i] >> 0 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[((uint8_t*)src)[i] >> 4 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[((uint8_t*)src)[i] >> 0 & 0xf];
   }
 }
 
@@ -40,9 +40,9 @@ uint16_to_hex(void *dst, const void *src, size_t n)
 
   for (i = 0; i < n; i++) {
     v = htole16(((uint16_t*)src)[i]);
-    *(uint8_t*)dst++ = hex_chars[v >> 12 & 0xf];
-    *(uint8_t*)dst++ = hex_chars[v >> 8 & 0xf];
-    *(uint8_t*)dst++ = hex_chars[v >> 4 & 0xf];
-    *(uint8_t*)dst++ = hex_chars[v >> 0 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[v >> 12 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[v >> 8 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[v >> 4 & 0xf];
+    *(uint8_t*)dst++ = base16_symbols[v >> 0 & 0xf];
   }
 }
