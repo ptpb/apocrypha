@@ -556,8 +556,8 @@ http_read(void *const buf_head, size_t buf_size,
             if (buf_tail - (uint8_t *)buf < 2)
               goto handled_buf;
             ret = next_terminator(CRLF);
-            if (ret == NULL)
-              // unterminated chunk; the client is in error
+            if (ret == NULL || ret != buf)
+              // unterminated or invalidly terminated chunk; the client is in error
               parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
             buf += length;
