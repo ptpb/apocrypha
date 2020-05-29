@@ -6,10 +6,10 @@ import struct
 import sys
 
 host = "ptpb.io"
-host = "localhost"
+#host = "localhost"
 port = 26708
 http_port = 443
-http_port = 8000
+#http_port = 8000
 
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False

@@ -244,7 +244,7 @@ typedef struct header_entry {
 
 static header_entry_t string_headers[] = {
   {(uint8_t *)"content-length", 14, HEADER_CONTENT_LENGTH},
-  {(uint8_t *)"transfer-encoding", 17, HEADER_CONTENT_LENGTH},
+  {(uint8_t *)"transfer-encoding", 17, HEADER_TRANSFER_ENCODING},
 };
 
 header_t
@@ -456,8 +456,11 @@ http_read(void *const buf_head, size_t buf_size,
           if (context->parser.length_mode != LENGTH_MODE_NONE)
             parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
 
-          // implement
-          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+          if (end - value != 7 || memcmp(value, "chunked", 7) != 0)
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+          context->chunked.read = 0;
+          context->chunked.length = 0;
           context->parser.length_mode = LENGTH_MODE_CHUNKED;
           break;
         case HEADER_CONTENT_LENGTH:
@@ -513,11 +516,59 @@ http_read(void *const buf_head, size_t buf_size,
           } else
             goto handled_buf;
         } else
-          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
         break;
       case LENGTH_MODE_CHUNKED:
-        // implement
-        parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
+
+        if (context->method == METHOD_POST) {
+        next_chunk:
+          if (context->chunked.length == 0) {
+            ret = next_terminator(CRLF);
+            if (ret == NULL)
+              goto handled_buf;
+
+            if (base16_to_uint64(buf, &context->chunked.length, ret - buf) < 0)
+              parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+            //fprintf(stderr, "new chunk: size: %ld %p %ld\n", context->chunked.length, buf, ret - buf);
+
+            buf += (ret - buf) + length;
+
+            if (context->chunked.length == 0) {
+              handle_body_storage(&context->parser.storage,
+                                  &context->parser.storage_state,
+                                  NULL, 0);
+              parser_stop(STATUS_OK, PROTOCOL_WRITING);
+            }
+          }
+
+          size_t len = min(context->chunked.length - context->chunked.read,
+                           (size_t)(buf_tail - (uint8_t *)buf));
+
+          len = handle_body_storage(&context->parser.storage,
+                                    &context->parser.storage_state,
+                                    buf, len);
+
+          buf += len;
+          context->chunked.read += len;
+
+          if (context->chunked.read == context->chunked.length) {
+            if (buf_tail - (uint8_t *)buf < 2)
+              goto handled_buf;
+            ret = next_terminator(CRLF);
+            if (ret == NULL)
+              // unterminated chunk; the client is in error
+              parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+
+            buf += length;
+
+            context->chunked.length = 0;
+            context->chunked.read = 0;
+            goto next_chunk;
+          } else
+            goto handled_buf;
+        } else
+          parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
         break;
       }
       assert(0 && "unreachable: implicit body state transition");
