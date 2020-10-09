@@ -18,4 +18,9 @@ $(NAME): $(OBJ)
 clean:
 	rm -f $(NAME) $(OBJ)
 
-.PHONY: clean all
+gencert:
+	openssl req -new \
+		-newkey rsa:2048 -nodes -keyout key.pem \
+		-x509 -out cert.pem -subj '/CN=localhost.localdomain'
+
+.PHONY: clean all gencert

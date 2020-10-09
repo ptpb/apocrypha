@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -9,7 +10,6 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
-#include <sys/fcntl.h>
 
 #include <tls.h>
 

@@ -1,13 +1,12 @@
 #include <assert.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <sys/fcntl.h>
 
 #include "error.h"
 #include "http.h"
