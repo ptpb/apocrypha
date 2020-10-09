@@ -1,5 +1,5 @@
-#define NATIVE_PORT 26708
-#define HTTP_PORT 667
+#define NATIVE_PORT 0
+#define HTTP_PORT 0
 
 #define TLS_CA "/etc/ssl/cert.pem"
 #define TLS_CERT "cert.pem"

@@ -241,7 +241,7 @@ main(void)
   //
 
   int
-  open_port(uint16_t port)
+  open_port(const char *name, uint16_t port)
   {
     int fd;
 
@@ -261,6 +261,11 @@ main(void)
     ret = bind(fd, (struct sockaddr *)&sockaddr, (sizeof (struct sockaddr_in6)));
     esprintf(ret, "bind: %hu", port);
 
+    socklen_t socklen = (sizeof (struct sockaddr_in6));
+    ret = getsockname(fd, (struct sockaddr *)&sockaddr, &socklen);
+    esprintf(ret, "getsockname");
+    fprintf(stderr, "protocol %s listening on port %d\n", name, ntohs(sockaddr.sin6_port));
+
     ret = listen(fd, 1024);
     esprintf(ret, "listen");
 
@@ -268,7 +273,7 @@ main(void)
   }
 
   protocol_t binary = {
-    .fd = open_port(NATIVE_PORT),
+    .fd = open_port("native+tls", NATIVE_PORT),
     .init = &binary_init,
     .read = &binary_read,
     .write = &binary_write,
@@ -276,7 +281,7 @@ main(void)
   };
 
   protocol_t http = {
-    .fd = open_port(HTTP_PORT),
+    .fd = open_port("http+tls", HTTP_PORT),
     .init = &http_init,
     .read = &http_read,
     .write = &http_write,
