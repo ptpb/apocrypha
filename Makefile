@@ -13,7 +13,7 @@ all: $(NAME)
 
 $(NAME): $(OBJ)
 	@echo CC -o $@
-	@$(CC) -o $@ $(OBJ) $(LDFLAGS)
+	@$(CC) -o $@ $(OBJ) $(LIBS) $(LDFLAGS)
 
 clean:
 	rm -f $(NAME) $(OBJ)
