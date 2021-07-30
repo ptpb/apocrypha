@@ -9,14 +9,14 @@
 
 uint8_t base75_symbols[75] =
   // ascii ordinal sort order
-  "!$+,-./0123456789:=?@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
+  "!$+,-[]0123456789:=?@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
 
 #define INVALID_SYMBOL 255
 
 uint8_t symbols_base75[256] = {
   [0 ... 255] = INVALID_SYMBOL,
   ['!'] = 0,  ['$'] = 1,  ['+'] = 2,  [','] = 3,  ['-'] = 4,
-  ['.'] = 5,  ['/'] = 6,  ['0'] = 7,  ['1'] = 8,  ['2'] = 9,
+  ['['] = 5,  [']'] = 6,  ['0'] = 7,  ['1'] = 8,  ['2'] = 9,
   ['3'] = 10, ['4'] = 11, ['5'] = 12, ['6'] = 13, ['7'] = 14,
   ['8'] = 15, ['9'] = 16, [':'] = 17, ['='] = 18, ['?'] = 19,
   ['@'] = 20, ['A'] = 21, ['B'] = 22, ['C'] = 23, ['D'] = 24,
