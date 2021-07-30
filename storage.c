@@ -78,8 +78,9 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length)
 
   assert(storage->write_fd > 0);
   ret = rename(storage->temp_filename, hex_digest);
+  fprintf(stderr, "write hash: %s\n", hex_digest);
+
   esprintf(ret, "rename: %s -> %s", storage->temp_filename, hex_digest);
-  fprintf(stderr, "%s\n", hex_digest);
 
   ret = close(storage->write_fd);
   esprintf(ret, "close: %d", storage->write_fd);
@@ -87,12 +88,15 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length)
 }
 
 int
-storage_open_reader(storage_reader_t *reader, const char *name, uint32_t name_length)
+storage_open_reader(storage_reader_t *reader, const char *name, uint32_t name_length, uint64_t first, uint64_t last)
 {
   int ret;
+  off_t off;
 
   char hex_digest[32 * 2 + 1];
   storage_hex_digest(name, name_length, hex_digest);
+
+  fprintf(stderr, "read hash: %s\n", hex_digest);
 
   ret = open(hex_digest, O_RDONLY);
   if (ret < 0)
@@ -104,9 +108,27 @@ storage_open_reader(storage_reader_t *reader, const char *name, uint32_t name_le
   struct stat sb;
   ret = fstat(reader->read_fd, &sb);
   if (ret < 0)
-    return ret;
+    goto error;
 
   reader->size = sb.st_size;
 
+  last++;
+  if (first > (uint64_t)sb.st_size || first > last)
+    goto error;
+  if (last > (uint64_t)sb.st_size)
+    last = (uint64_t)sb.st_size;
+
+  off = lseek(reader->read_fd, first, SEEK_SET);
+  if (off < 0)
+    goto error;
+
+  assert((uint64_t)off == first);
+
+  reader->length = last - first;
+  fprintf(stderr, "%zu, %zu, %zu\n", first, last, reader->length);
+
   return 0;
+error:
+  close(reader->read_fd);
+  return -1;
 }

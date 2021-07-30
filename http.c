@@ -70,6 +70,7 @@ typedef enum method {
   METHOD_GET,
   METHOD_POST,
   METHOD_OPTIONS,
+  METHOD_HEAD,
   METHOD_LAST
 } method_t;
 
@@ -77,6 +78,7 @@ typedef enum status_code {
   STATUS_UNSET = 0,
   STATUS_OK,
   STATUS_NO_CONTENT,
+  STATUS_PARTIAL_CONTENT,
   STATUS_BAD_REQUEST,
   STATUS_NOT_FOUND,
   STATUS_CODE_LAST
@@ -86,10 +88,13 @@ typedef enum header {
   HEADER_INVALID = 0,
   HEADER_CONTENT_LENGTH,
   HEADER_CONTENT_TYPE,
+  HEADER_CONTENT_RANGE,
   HEADER_TRANSFER_ENCODING,
   HEADER_ACAO,
   HEADER_ACAH,
   HEADER_ACAM,
+  HEADER_ACCEPT_RANGES,
+  HEADER_RANGE,
   HEADER_LAST,
 } header_t;
 
@@ -133,6 +138,7 @@ static char
 protocol_code[STATUS_CODE_LAST][STATUS_CODE_SIZE] = {
   [STATUS_OK] = "200",
   [STATUS_NO_CONTENT] = "204",
+  [STATUS_PARTIAL_CONTENT] = "206",
   [STATUS_BAD_REQUEST] = "400",
   [STATUS_NOT_FOUND] = "404",
 };
@@ -150,12 +156,15 @@ static header_string_t header_strings[HEADER_LAST] = {
   [HEADER_ACAO] = {"access-control-allow-origin: *", 30},
   [HEADER_ACAH] = {"access-control-allow-headers: *", 31},
   [HEADER_ACAM] = {"access-control-allow-methods: *", 31},
+  [HEADER_ACCEPT_RANGES] = {"accept-ranges: bytes", 20},
   [HEADER_CONTENT_TYPE] = {"content-type: ", 14},
   [HEADER_CONTENT_LENGTH] = {"content-length: ", 16},
+  [HEADER_CONTENT_RANGE] = {"content-range: bytes ", 21},
 };
 
-static header_t method_headers[METHOD_LAST][5] = {
-  [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_CONTENT_LENGTH, HEADER_INVALID},
+static header_t method_headers[METHOD_LAST][6] = {
+  [METHOD_GET] = {HEADER_TRANSFER_ENCODING, HEADER_CONTENT_TYPE, HEADER_CONTENT_LENGTH, HEADER_ACCEPT_RANGES, HEADER_CONTENT_RANGE, HEADER_INVALID},
+  [METHOD_HEAD] = {HEADER_TRANSFER_ENCODING, HEADER_ACCEPT_RANGES, HEADER_INVALID},
   [METHOD_POST] = {HEADER_TRANSFER_ENCODING, HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
   [METHOD_OPTIONS] = {HEADER_ACAO, HEADER_ACAH, HEADER_ACAM, HEADER_INVALID},
 };
@@ -191,6 +200,10 @@ typedef struct http_context {
       uint64_t read;
     } chunked;
   };
+  struct {
+    uint64_t first;
+    uint64_t last;
+  } range;
   char uri[MAX_URI_LENGTH + 1];
   uint8_t uri_length;
   //
@@ -244,6 +257,7 @@ typedef struct header_entry {
 static header_entry_t string_headers[] = {
   {(uint8_t *)"content-length", 14, HEADER_CONTENT_LENGTH},
   {(uint8_t *)"transfer-encoding", 17, HEADER_TRANSFER_ENCODING},
+  {(uint8_t *)"range", 5, HEADER_RANGE},
 };
 
 header_t
@@ -312,7 +326,7 @@ http_read(void *const buf_head, size_t buf_size,
   void *ret = NULL;
   uint8_t *buf_tail = (uint8_t *)buf_head + buf_size;
 
-  fprintf(stderr, "http_read %ld\n", buf_size);
+  fprintf(stderr, "http_read %zu\n", buf_size);
 
   parser_terminator_t match;
   int length;
@@ -361,6 +375,9 @@ http_read(void *const buf_head, size_t buf_size,
 
   parser_state_t next_state = PARSER_INVALID;
 
+  context->range.first = 0;
+  context->range.last = UINT64_MAX - 1;
+
   while (context->parser.state != PARSER_INVALID) {
 
     // PARSING_BODY handles its own state transitions
@@ -387,6 +404,8 @@ http_read(void *const buf_head, size_t buf_size,
         fprintf(stderr, "method: `%s`\n", (char *)buf);
         if (3 == method_length && memcmp(buf, "GET", 3) == 0)
           context->method = METHOD_GET;
+        else if (4 == method_length && memcmp(buf, "HEAD", 3) == 0)
+          context->method = METHOD_HEAD;
         else if (4 == method_length && memcmp(buf, "POST", 4) == 0)
           context->method = METHOD_POST;
         else if (7 == method_length && memcmp(buf, "OPTIONS", 7) == 0) {
@@ -396,7 +415,7 @@ http_read(void *const buf_head, size_t buf_size,
         }
         else {
           *(char *)ret = '\0';
-          fprintf(stderr, "unsupported method: %s\n", (char *)buf);
+          fprintf(stderr, "unsupported method: `%s`\n", (char *)buf);
           context->status_code = STATUS_BAD_REQUEST;
         }
       }
@@ -445,7 +464,7 @@ http_read(void *const buf_head, size_t buf_size,
         // with parsing them
         break;
       {
-        uint8_t *value, *end;
+        uint8_t *value, *end, *tok;
         int valid;
         value = mem_nows(buf, ret - buf);
         end = mem_rnows(buf, ret - buf);
@@ -476,6 +495,24 @@ http_read(void *const buf_head, size_t buf_size,
 
           context->parser.length_mode = LENGTH_MODE_FIXED;
           break;
+        case HEADER_RANGE:
+          if (end - value < 6 || memcmp(value, "bytes=", 6) != 0)
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+          value += 6;
+          tok = memrchr(value, '-', end - value);
+          // parse "first-byte-pos"
+          valid = base10_to_uint64(value, &context->range.first, tok - value);
+          if (valid < 0)
+            parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+          // parse "last-byte-pos"
+          if (tok + 1 != end) {
+            value = tok + 1;
+            valid = base10_to_uint64(value, &context->range.last, end - value);
+            if (valid < 0)
+              parser_stop(STATUS_BAD_REQUEST, PROTOCOL_SHUTDOWN);
+          }
+          fprintf(stderr, "range: %zd %zd\n", context->range.first, context->range.last);
+          break;
         case HEADER_INVALID:
           assert(0 && "unreachable");
           break;
@@ -491,6 +528,8 @@ http_read(void *const buf_head, size_t buf_size,
           parser_stop(STATUS_UNSET, PROTOCOL_WRITING);
         else if (context->method == METHOD_OPTIONS)
           parser_stop(STATUS_NO_CONTENT, PROTOCOL_WRITING);
+        else if (context->method == METHOD_HEAD)
+          parser_stop(STATUS_OK, PROTOCOL_WRITING);
         else
           parser_stop(STATUS_BAD_REQUEST, PROTOCOL_WRITING);
         break;
@@ -645,11 +684,14 @@ http_write(void *const buf_head, size_t buf_size,
         }
       }
 
-      ret = storage_open_reader(&context->emitter.storage, context->uri + 1, context->uri_length - 1);
+      ret = storage_open_reader(&context->emitter.storage, context->uri + 1, context->uri_length - 1, context->range.first, context->range.last);
       if (ret < 0)
         context->status_code = STATUS_NOT_FOUND;
       else {
-        context->status_code = STATUS_OK;
+        if (context->range.first != 0 || context->range.last != (UINT64_MAX - 1))
+          context->status_code = STATUS_PARTIAL_CONTENT;
+        else
+          context->status_code = STATUS_OK;
         context->emitter.length_mode = LENGTH_MODE_FIXED;
       }
       break;
@@ -684,9 +726,10 @@ http_write(void *const buf_head, size_t buf_size,
           if (context->method != METHOD_OPTIONS &&
               context->cors_mode != CORS_PREFLIGHT_COMPLETE)
             goto next_header;
+          [[fallthrough]];
+        case HEADER_ACCEPT_RANGES:
           if (_buf_length() < header_string.length + 2)
             goto handled_buf;
-
           memcpy(buf, header_string.buf, header_string.length);
           buf += header_string.length;
           *buf++ = '\r';
@@ -703,6 +746,40 @@ http_write(void *const buf_head, size_t buf_size,
           *buf++ = '\r';
           *buf++ = '\n';
           break;
+        case HEADER_CONTENT_RANGE:
+          if (context->status_code != STATUS_PARTIAL_CONTENT)
+            goto next_header;
+          if (_buf_length() < header_string.length + 2 + 2 + 20 + 20 + 20)
+            goto handled_buf;
+
+          memcpy(buf, header_string.buf, header_string.length);
+          buf += header_string.length;
+
+          fprintf(stderr, "need content-range\n");
+
+          {
+            size_t offset;
+
+            offset = uint64_to_base10(buf, context->range.first, 20);
+            memmove(buf, buf + offset, 20 - offset);
+            buf += 20 - offset;
+
+            *buf++ = '-';
+
+            offset = uint64_to_base10(buf, context->range.last, 20);
+            memmove(buf, buf + offset, 20 - offset);
+            buf += 20 - offset;
+
+            *buf++ = '/';
+
+            offset = uint64_to_base10(buf, context->emitter.storage.size, 20);
+            memmove(buf, buf + offset, 20 - offset);
+            buf += 20 - offset;
+          }
+
+          *buf++ = '\r';
+          *buf++ = '\n';
+          break;
         case HEADER_CONTENT_LENGTH:
           if (context->emitter.length_mode != LENGTH_MODE_FIXED)
             goto next_header;
@@ -713,7 +790,7 @@ http_write(void *const buf_head, size_t buf_size,
           buf += header_string.length;
 
           {
-            size_t offset = uint64_to_base10(buf, context->emitter.storage.size, 20);
+            size_t offset = uint64_to_base10(buf, context->emitter.storage.length, 20);
             memmove(buf, buf + offset, 20 - offset);
             buf += 20 - offset;
           }
@@ -771,7 +848,7 @@ http_write(void *const buf_head, size_t buf_size,
           }                                                        \
         } while (0);
 
-      if (context->status_code != STATUS_OK)
+      if (context->status_code != STATUS_OK && context->status_code != STATUS_PARTIAL_CONTENT)
         break;
 
       switch (context->method) {
@@ -781,17 +858,21 @@ http_write(void *const buf_head, size_t buf_size,
           goto handled_buf;
 
         assert(context->emitter.storage.read_fd != -1);
-        ret = read(context->emitter.storage.read_fd, buf + CHUNK_OFFSET,
-                   _buf_length() - CHUNK_PAD_SIZE);
-        esprintf(ret, "read");
-        if (ret == 0) {
+        ssize_t count = read(context->emitter.storage.read_fd, buf + CHUNK_OFFSET,
+                             _buf_length() - CHUNK_PAD_SIZE);
+        ssize_t remaining = context->emitter.storage.length - context->emitter.storage.read_bytes;
+        if (remaining < count)
+          count = remaining;
+        context->emitter.storage.read_bytes += count;
+        esprintf(count, "read");
+        if (count == 0) {
           // end of file
           fprintf(stderr, "eof\n");
           ret = close(context->emitter.storage.read_fd);
           context->emitter.storage.read_fd = -1;
           esprintf(ret, "close");
         } else {
-          terminate_chunk(ret);
+          terminate_chunk(count);
           goto handled_buf;
         }
         break;

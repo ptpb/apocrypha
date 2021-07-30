@@ -24,7 +24,9 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length);
 typedef struct storage_reader {
   int read_fd;
   size_t size;
+  size_t length;
+  size_t read_bytes;
 } storage_reader_t;
 
 int
-storage_open_reader(storage_reader_t *storage, const char *name, uint32_t name_length);
+storage_open_reader(storage_reader_t *storage, const char *name, uint32_t name_length, uint64_t first, uint64_t last);
