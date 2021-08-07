@@ -1,14 +1,15 @@
-#include <openssl/evp.h>
+#include <gnutls/crypto.h>
 
 #pragma once
+
+#define SHA256_LENGTH 32
 
 typedef struct storage_writer {
   int write_fd;
   char temp_filename[7];
-  EVP_MD_CTX digest;
-  uint8_t digest_value[EVP_MAX_MD_SIZE];
-  uint32_t digest_length;
-  char name[EVP_MAX_MD_SIZE * 2 + 1];
+  gnutls_hash_hd_t digest;
+  uint8_t digest_value[SHA256_LENGTH];
+  char name[SHA256_LENGTH * 2 + 1];
   uint32_t name_length;
 } storage_writer_t;
 

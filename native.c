@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <arpa/inet.h>
 
@@ -140,7 +141,7 @@ binary_write(void *const buf_head, size_t buf_size,
       if (_buf_length() < (sizeof (uint32_t)) + context->storage.name_length)
         goto handled_buf;
 
-      *(uint32_t*)buf = htonl(context->storage.digest_length);
+      *(uint32_t*)buf = htonl(SHA256_LENGTH);
       buf += (sizeof (uint32_t));
       memcpy(buf, context->storage.name, context->storage.name_length);
       buf += context->storage.name_length;

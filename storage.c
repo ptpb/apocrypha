@@ -2,9 +2,9 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include <sys/stat.h>
-#include <openssl/evp.h>
 
 #include "error.h"
 #include "hex.h"
@@ -23,7 +23,8 @@ storage_open_writer(storage_writer_t *storage)
   esprintf(ret, "mkostemp: %s", storage->temp_filename);
   storage->write_fd = ret;
 
-  EVP_DigestInit(&storage->digest, EVP_sha256());
+  ret = gnutls_hash_init(&storage->digest, GNUTLS_DIG_SHA256);
+  enprintf(ret, "gnutls_hash_init: %s\n", gnutls_strerror(ret));
 }
 
 ssize_t
@@ -31,8 +32,8 @@ storage_write(storage_writer_t *storage, void *buf, size_t len)
 {
   ssize_t ret;
 
-  ret = EVP_DigestUpdate(&storage->digest, buf, len);
-  assert(ret == 1 && "EVP_DigestUpdate");
+  ret = gnutls_hash(storage->digest, buf, len);
+  enprintf(ret, "gnutls_hash: %s\n", gnutls_strerror(ret));
 
   ret = write(storage->write_fd, buf, len);
   esprintf(ret, "write: %d", storage->write_fd);
@@ -43,16 +44,18 @@ storage_write(storage_writer_t *storage, void *buf, size_t len)
 static inline void
 storage_hex_digest(const void *name, uint32_t name_length, char *hex_digest)
 {
-  EVP_MD_CTX digest;
-  uint8_t digest_value[EVP_MAX_MD_SIZE];
-  uint32_t digest_length;
+  gnutls_hash_hd_t digest;
+  uint8_t digest_value[SHA256_LENGTH];
+  int ret;
 
-  EVP_DigestInit(&digest, EVP_sha256());
-  EVP_DigestUpdate(&digest, name, name_length);
-  EVP_DigestFinal(&digest, digest_value, &digest_length);
+  ret = gnutls_hash_init(&digest, GNUTLS_DIG_SHA256);
+  enprintf(ret, "gnutls_hash_init: %s\n", gnutls_strerror(ret));
+  ret = gnutls_hash(digest, name, name_length);
+  enprintf(ret, "gnutls_hash: %s\n", gnutls_strerror(ret));
+  gnutls_hash_deinit(digest, digest_value);
 
-  uint8_to_hex(hex_digest, digest_value, digest_length);
-  hex_digest[digest_length * 2] = '\0';
+  uint8_to_hex(hex_digest, digest_value, SHA256_LENGTH);
+  hex_digest[SHA256_LENGTH * 2] = '\0';
 }
 
 void
@@ -60,10 +63,10 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length)
 {
   int ret;
 
-  EVP_DigestFinal(&storage->digest, storage->digest_value, &storage->digest_length);
+  gnutls_hash_deinit(storage->digest, storage->digest_value);
 
   assert(base75_min_symbols((sizeof (storage->digest_value))) <= (sizeof (storage->name)));
-  size_t base75_size = uint8_to_base75(storage->digest_value, storage->digest_length, storage->name);
+  size_t base75_size = uint8_to_base75(storage->digest_value, SHA256_LENGTH, storage->name);
   storage->name[base75_size] = '\0';
   // a byte up to 8 bytes prior to base75_size could be zero
   char *tok = memchr(storage->name + base75_size - 8, '\0', 9);
@@ -73,7 +76,7 @@ storage_close_writer(storage_writer_t *storage, uint8_t prefix_length)
   storage->name_length = prefix_length < tok - storage->name ? prefix_length : tok - storage->name;
 
   // fixme: explain this
-  char hex_digest[storage->digest_length * 2 + 1];
+  char hex_digest[SHA256_LENGTH * 2 + 1];
   storage_hex_digest(storage->name, storage->name_length, hex_digest);
 
   assert(storage->write_fd > 0);

@@ -2,7 +2,7 @@
 PREFIX ?= /usr/local
 
 # includes and libs
-LIBS = -ltls -lcrypto
+LIBS = -lgnutls
 
 # flags
 WARNINGS = \

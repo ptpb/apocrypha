@@ -11,7 +11,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 
-#include <tls.h>
+#include <gnutls/gnutls.h>
 
 #include "error.h"
 #include "http.h"
@@ -38,7 +38,7 @@ typedef struct protocol {
 
 typedef struct client {
   int fd;
-  struct tls *tls;
+  gnutls_session_t session;
   uint8_t read_buf[BUF_SIZE];
   size_t read_buf_index;
   uint8_t write_buf[BUF_SIZE];
@@ -58,19 +58,25 @@ typedef struct client {
 #define MAX_CLIENTS 1024
 
 static void
-new_client(int epoll_fd, int client_fd, struct tls *tls, protocol_t *protocol) {
+new_client(int epoll_fd, int client_fd, gnutls_priority_t priority, gnutls_certificate_credentials_t credentials, protocol_t *protocol) {
   client_t *client;
   int ret;
 
   client = calloc(1, (sizeof (client_t)));
   client->fd = client_fd;
 
-  ret = tls_accept_socket(tls, &client->tls, client_fd);
-  esprintf(ret, "tls_accept_socket");
+  ret = gnutls_init(&client->session, GNUTLS_SERVER);
+  enprintf(ret, "gnutls_init");
+  ret = gnutls_priority_set(client->session, priority);
+  enprintf(ret, "gnutls_priority_set");
+  ret = gnutls_credentials_set(client->session, GNUTLS_CRD_CERTIFICATE, credentials);
+  enprintf(ret, "gnutls_credentials_set");
+  gnutls_certificate_server_set_request(client->session, GNUTLS_CERT_IGNORE);
+  gnutls_transport_set_int(client->session, client_fd);
 
   client->context = (*protocol->init)();
   client->protocol = protocol;
-  client->protocol_state = PROTOCOL_READING;
+  client->protocol_state = PROTOCOL_HANDSHAKE;
 
   ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &(struct epoll_event){
     .events = EPOLLIN | EPOLLONESHOT,
@@ -88,17 +94,27 @@ handle_client_read(client_t *client) {
   size_t buf_length;
   size_t buf_handled;
 
-  while (client->protocol_state == PROTOCOL_READING) {
-    ret = tls_read(client->tls, client->read_buf + client->read_buf_index, (sizeof (client->read_buf)) - client->read_buf_index);
-    if (ret == TLS_WANT_POLLIN)
+  while (client->protocol_state == PROTOCOL_HANDSHAKE) {
+    ret = gnutls_handshake(client->session);
+    if (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN)
       break;
     else if (ret < 0) {
-      fprintf(stderr, "tls_read: %s\n", tls_error(client->tls));
+      fprintf(stderr, "gnutls_handshake: %s\n", gnutls_strerror(ret));
+      client->protocol_state = PROTOCOL_SHUTDOWN;
+    } else
+      client->protocol_state = PROTOCOL_READING;
+  }
+
+  while (client->protocol_state == PROTOCOL_READING) {
+    ret = gnutls_record_recv(client->session, client->read_buf + client->read_buf_index, (sizeof (client->read_buf)) - client->read_buf_index);
+    if (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN)
+      break;
+    else if (ret < 0) {
+      fprintf(stderr, "gnutls_record_recv: %s\n", gnutls_strerror(ret));
       client->protocol_state = PROTOCOL_SHUTDOWN;
     } else if (ret == 0) {
       client->protocol_state = PROTOCOL_SHUTDOWN;
     } else {
-      //fprintf(stderr, "tls_read: %d\n", ret);
       buf_length = client->read_buf_index + ret;
       buf_handled = (*client->protocol->read)(client->read_buf, buf_length, client->context, &client->protocol_state);
 
@@ -130,11 +146,11 @@ handle_client_write(client_t *client)
   size_t write_offset = 0;
 
   while (write_offset != client->write_buf_index) {
-    ret = tls_write(client->tls, client->write_buf + write_offset, client->write_buf_index - write_offset);
-    if (ret == TLS_WANT_POLLOUT) {
+    ret = gnutls_record_send(client->session, client->write_buf + write_offset, client->write_buf_index - write_offset);
+    if (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN) {
       break;
     } else if (ret < 0) {
-      fprintf(stderr, "tls_write: %s\n", tls_error(client->tls));
+      fprintf(stderr, "gnutls_record_send: %s\n", gnutls_strerror(ret));
       client->protocol_state = PROTOCOL_SHUTDOWN;
       break;
     } else {
@@ -147,57 +163,39 @@ handle_client_write(client_t *client)
 }
 
 void
-load_tls_config(int dirfd, struct tls *ctx)
+load_tls_config(int dirfd, gnutls_certificate_credentials_t *credentials)
 {
-  struct tls_config *tls_config;
   int ret;
 
-  static uint8_t buf[8092];
-
-  //
-
-  tls_config = tls_config_new();
-  assert(tls_config != NULL && "tls_config_new");
+  ret = gnutls_certificate_allocate_credentials(credentials);
+  enprintf(ret, "gnutls_certificate_allocate_credentials: %s\n", gnutls_strerror(ret));
 
   //
 
   ssize_t size;
   int fd;
+  uint8_t buf[2][8092];
+  const char *path[2] = {TLS_CERT, TLS_KEY};
+  gnutls_datum_t datum[2];
 
-  fd = openat(dirfd, TLS_CERT, O_RDONLY);
-  esprintf(fd, "open: %s", TLS_CERT);
+  for (int i = 0; i < 2; i++) {
+    fd = openat(dirfd, path[i], O_RDONLY);
+    esprintf(fd, "open: %s", path[i]);
 
-  size = read(fd, buf, (sizeof (buf)));
-  esprintf(size, "read: %s", TLS_CERT);
-  assert(size != (sizeof (buf)) && "tls_cert too large");
+    size = read(fd, buf[i], (sizeof (buf)));
+    esprintf(size, "read: %s", TLS_CERT);
+    assert(size != (sizeof (buf[i])) && "tls_cert too large");
 
-  ret = tls_config_set_cert_mem(tls_config, buf, size);
-  etcprintf(ret, tls_config, "tls_config_set_cert_mem: %s", TLS_CERT);
+    ret = close(fd);
+    esprintf(ret, "close");
 
-  ret = close(fd);
-  esprintf(ret, "close");
+    datum[i].data = buf[i];
+    datum[i].size = size;
+  }
 
+  ret = gnutls_certificate_set_x509_key_mem(*credentials, &datum[0], &datum[1], GNUTLS_X509_FMT_PEM);
+  enprintf(ret, "gnutls_certificate_set_x509_key_mem: %s\n", gnutls_strerror(ret));
   //
-
-  fd = openat(dirfd, TLS_KEY, O_RDONLY);
-  esprintf(fd, "open: %s", TLS_CERT);
-
-  size = read(fd, buf, (sizeof (buf)));
-  esprintf(size, "read: %s", TLS_CERT);
-  assert(size != (sizeof (buf)) && "tls_key too large");
-
-  ret = tls_config_set_key_mem(tls_config, buf, size);
-  etcprintf(ret, tls_config, "tls_config_set_key_mem: %s", TLS_KEY);
-
-  ret = close(fd);
-  esprintf(ret, "close");
-
-  //
-
-  ret = tls_configure(ctx, tls_config);
-  enprintf(ret, "tls_configure");
-
-  tls_config_free(tls_config);
 }
 
 typedef enum signal_state {
@@ -218,7 +216,8 @@ int
 main(void)
 {
   int ret;
-  struct tls *tls;
+  gnutls_priority_t priority;
+  gnutls_certificate_credentials_t credentials;
 
   //
 
@@ -231,13 +230,12 @@ main(void)
 
   //
 
-  ret = tls_init();
-  enprintf(ret, "tls_init");
+  ret = gnutls_global_init();
+  enprintf(ret, "gnutls_global_init: %s\n", gnutls_strerror(ret));
 
-  tls = tls_server();
-  assert(tls != NULL && "tls_server");
-
-  load_tls_config(dirfd, tls);
+  ret = gnutls_priority_init(&priority, NULL, NULL);
+  enprintf(ret, "gnutls_priority_init: %s\n", gnutls_strerror(ret));
+  load_tls_config(dirfd, &credentials);
   //
 
   int
@@ -330,8 +328,8 @@ main(void)
     switch (signal_state) {
     case SIGNAL_WANT_TLS_CONFIG_RELOAD:
       fprintf(stderr, "want_tls_config_reload\n");
-      tls_reset(tls);
-      load_tls_config(dirfd, tls);
+      gnutls_certificate_free_credentials(credentials);
+      load_tls_config(dirfd, &credentials);
       signal_state = SIGNAL_NONE;
       break;
     case SIGNAL_NONE:
@@ -356,13 +354,14 @@ main(void)
           fprintf(stderr, "accept4 %d\n", ret);
           client_fd = ret;
 
-          new_client(epoll_fd, client_fd, tls, protocol);
+          new_client(epoll_fd, client_fd, priority, credentials, protocol);
         }
       } else {
         uint32_t event = events[event_index].events;
         client_t *client = (client_t *)events[event_index].data.ptr;
-        assert(((event & EPOLLIN) && client->protocol_state == PROTOCOL_READING) ||
-               ((event & EPOLLOUT) && client->protocol_state == PROTOCOL_WRITING));
+        assert(((event & EPOLLIN) && (client->protocol_state == PROTOCOL_READING
+                                      || client->protocol_state == PROTOCOL_HANDSHAKE))
+               || ((event & EPOLLOUT) && client->protocol_state == PROTOCOL_WRITING));
 
         if (event & EPOLLIN)
           handle_client_read(client);
@@ -377,6 +376,7 @@ main(void)
         }
 
         switch (client->protocol_state) {
+        case PROTOCOL_HANDSHAKE:
         case PROTOCOL_READING:
           ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &(struct epoll_event){
             .events = EPOLLIN | draining() | EPOLLONESHOT,
@@ -392,11 +392,12 @@ main(void)
           esprintf(ret, "epoll_ctl: EPOLL_CTL_MOD");
           break;
         case PROTOCOL_SHUTDOWN:
-          fprintf(stderr, "PROTOCOL_SHUTDOWN\n");
-          ret = tls_close(client->tls);
-          if (ret < 0)
-            fprintf(stderr, "tls_close: %s\n", tls_error(client->tls));
-          tls_free(client->tls);
+          fprintf(stderr, "PROTOCOL_SHUTDOWN %p\n", client);
+          ret = gnutls_bye(client->session, GNUTLS_SHUT_WR);
+          if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED)
+            continue;
+          enprintf(ret, "gnutls_bye: %s\n", gnutls_strerror(ret));
+          gnutls_deinit(client->session);
 
           ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
           esprintf(ret, "epoll_ctl: EPOLL_CTL_DEL");
@@ -417,7 +418,9 @@ main(void)
 
   //
 
-  tls_free(tls);
+  gnutls_certificate_free_credentials(credentials);
+  gnutls_priority_deinit(priority);
+  gnutls_global_deinit();
 
   return 0;
 }
