@@ -15,6 +15,7 @@
 #include "hex.h"
 #include "token.h"
 #include "storage.h"
+#include "stats.h"
 
 typedef enum parser_terminator {
   INVALID_TERMINATOR = 0,
@@ -174,12 +175,19 @@ static header_t method_headers[METHOD_LAST][6] = {
 #define MAX_URI_LENGTH 127
 #define QUALIFIED_URI_LENGTH 64
 
+typedef enum content_mode {
+  CONTENT_MODE_INVALID = 0,
+  CONTENT_MODE_STATS,
+  CONTENT_MODE_STORAGE
+} content_mode_t;
+
 typedef struct http_context {
   struct {
     emitter_state_t state;
     uint8_t header_index;
     storage_reader_t storage;
     length_mode_t length_mode;
+    content_mode_t content_mode;
   } emitter;
   struct {
     parser_state_t state;
@@ -671,7 +679,10 @@ http_write(void *const buf_head, size_t buf_size,
         break;
       }
 
-      {
+      if (*(context->uri + 1) == 's' && context->uri_length == 2) {
+        context->status_code = STATUS_OK;
+        context->emitter.content_mode = CONTENT_MODE_STATS;
+      } else {
         char *ext;
         // find an extension
         ext = memrchr(context->uri + 1, '.', context->uri_length - 1);
@@ -682,17 +693,18 @@ http_write(void *const buf_head, size_t buf_size,
           *ext = '\0';
           context->uri_length = ext - context->uri;
         }
-      }
 
-      ret = storage_open_reader(&context->emitter.storage, context->uri + 1, context->uri_length - 1, context->range.first, context->range.last);
-      if (ret < 0)
-        context->status_code = STATUS_NOT_FOUND;
-      else {
-        if (context->range.first != 0 || context->range.last != (UINT64_MAX - 1))
-          context->status_code = STATUS_PARTIAL_CONTENT;
-        else
-          context->status_code = STATUS_OK;
-        context->emitter.length_mode = LENGTH_MODE_FIXED;
+        ret = storage_open_reader(&context->emitter.storage, context->uri + 1, context->uri_length - 1, context->range.first, context->range.last);
+        if (ret < 0)
+          context->status_code = STATUS_NOT_FOUND;
+        else {
+          if (context->range.first != 0 || context->range.last != (UINT64_MAX - 1))
+            context->status_code = STATUS_PARTIAL_CONTENT;
+          else
+            context->status_code = STATUS_OK;
+          context->emitter.length_mode = LENGTH_MODE_FIXED;
+          context->emitter.content_mode = CONTENT_MODE_STORAGE;
+        }
       }
       break;
     case EMITTING_STATUS_LINE:
@@ -838,7 +850,7 @@ http_write(void *const buf_head, size_t buf_size,
             buf += _size;                                          \
           else {                                                   \
             assert(_size < 0xffff);                                \
-            uint16_to_hex(buf, &_size, 1);                         \
+            uint16_to_hex(buf, _size);                             \
             buf += 4;                                              \
             *buf++ = '\r';                                         \
             *buf++ = '\n';                                         \
@@ -857,24 +869,38 @@ http_write(void *const buf_head, size_t buf_size,
         if (_buf_length() < CHUNK_PAD_SIZE + 1)
           goto handled_buf;
 
-        assert(context->emitter.storage.read_fd != -1);
-        ssize_t count = read(context->emitter.storage.read_fd, buf + CHUNK_OFFSET,
-                             _buf_length() - CHUNK_PAD_SIZE);
-        ssize_t remaining = context->emitter.storage.length - context->emitter.storage.read_bytes;
-        if (remaining < count)
-          count = remaining;
-        context->emitter.storage.read_bytes += count;
-        esprintf(count, "read");
-        if (count == 0) {
-          // end of file
-          fprintf(stderr, "eof\n");
-          ret = close(context->emitter.storage.read_fd);
-          context->emitter.storage.read_fd = -1;
-          esprintf(ret, "close");
-        } else {
-          terminate_chunk(count);
-          goto handled_buf;
+        uint16_t chunk_length;
+        switch (context->emitter.content_mode) {
+        case CONTENT_MODE_STORAGE:
+          assert(context->emitter.storage.read_fd != -1);
+          ssize_t count = read(context->emitter.storage.read_fd, buf + CHUNK_OFFSET,
+                               _buf_length() - CHUNK_PAD_SIZE);
+          esprintf(count, "read");
+          ssize_t remaining = context->emitter.storage.length - context->emitter.storage.read_bytes;
+          if (remaining < count)
+            chunk_length = remaining;
+          else
+            chunk_length = count;
+          context->emitter.storage.read_bytes += chunk_length;
+
+          if (chunk_length == 0) {
+            ret = close(context->emitter.storage.read_fd);
+            esprintf(ret, "close");
+            context->emitter.storage.read_fd = -1;
+          } else {
+            terminate_chunk(chunk_length);
+            goto handled_buf;
+          }
+          break;
+        case CONTENT_MODE_STATS:
+          chunk_length = stats_render(buf + CHUNK_OFFSET);
+          break;
+        default:
+          assert(0 && "unreachable");
+          break;
         }
+
+        terminate_chunk(chunk_length);
         break;
       case METHOD_POST:
         {

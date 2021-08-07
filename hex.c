@@ -1,6 +1,7 @@
 #include <endian.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <assert.h>
 
 static char base16_symbols[16] = "0123456789abcdef";
 
@@ -16,20 +17,35 @@ uint8_to_hex(void *dst, const void *src, size_t n)
 }
 
 void
-uint16_to_hex(void *dst, const void *src, size_t n)
+uint16_to_hex(void *dst, uint16_t n)
 {
-  size_t i;
-  uint16_t v;
-
-  for (i = 0; i < n; i++) {
-    v = htole16(((uint16_t*)src)[i]);
-    *(uint8_t*)dst++ = base16_symbols[v >> 12 & 0xf];
-    *(uint8_t*)dst++ = base16_symbols[v >> 8 & 0xf];
-    *(uint8_t*)dst++ = base16_symbols[v >> 4 & 0xf];
-    *(uint8_t*)dst++ = base16_symbols[v >> 0 & 0xf];
-  }
+  *(uint8_t*)dst++ = base16_symbols[n >> 12 & 0xf];
+  *(uint8_t*)dst++ = base16_symbols[n >> 8 & 0xf];
+  *(uint8_t*)dst++ = base16_symbols[n >> 4 & 0xf];
+  *(uint8_t*)dst++ = base16_symbols[n >> 0 & 0xf];
 }
 
+int
+uint64_to_dec(void *dst, uint64_t n)
+{
+  uint8_t *buf = dst;
+  int i, j;
+  int len;
+
+  while (n > 0) {
+    i = n % 10;
+    *buf++ = base16_symbols[i];
+    n /= 10;
+  }
+  len = buf - (uint8_t *)dst;
+  buf = dst;
+  for (i = 0, j = len - 1; i < j; i++, j--) {
+    uint8_t temp = buf[i];
+    buf[i] = buf[j];
+    buf[j] = temp;
+  }
+  return len;
+}
 
 static uint8_t base16_chars[256] = {
   [0 ... 255] = 255,
