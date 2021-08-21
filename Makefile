@@ -4,6 +4,7 @@ DEP = $(wildcard *.h)
 SRC = main.c native.c http.c hex.c token.c storage.c base75.c stats.c
 OBJ = $(SRC:.c=.o)
 NAME = apocrypha
+override CFLAGS += -Wall -std=gnu11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
 
 all: $(NAME)
 
