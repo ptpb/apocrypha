@@ -19,7 +19,7 @@
 #include "protocol.h"
 #include "config.h"
 
-#define BUF_SIZE 65536
+#define BUF_SIZE 0xffff
 
 typedef void *(protocol_init_t)(void);
 typedef size_t (protocol_read_t)(void *buf_head, size_t buf_size,
@@ -131,35 +131,42 @@ handle_client_write(client_t *client)
   int ret;
   size_t protocol_ret;
 
-  if (client->protocol_state == PROTOCOL_WRITING) {
-    protocol_ret = (*client->protocol->write)(client->write_buf + client->write_buf_index,
-                                              (sizeof (client->write_buf)) - client->write_buf_index,
-                                              client->context, &client->protocol_state);
-    client->write_buf_index += protocol_ret;
-
-    if (protocol_ret == 0 && client->write_buf_index == 0)
-      return;
-  }
-
-  assert(client->write_buf_index != 0);
-
   size_t write_offset = 0;
+  while (client->protocol_state == PROTOCOL_WRITING) {
+    if (client->protocol_state == PROTOCOL_WRITING) {
+      protocol_ret = (*client->protocol->write)(client->write_buf + client->write_buf_index,
+                                                (sizeof (client->write_buf)) - client->write_buf_index,
+                                                client->context, &client->protocol_state);
+      client->write_buf_index += protocol_ret;
 
-  while (write_offset != client->write_buf_index) {
-    ret = gnutls_record_send(client->session, client->write_buf + write_offset, client->write_buf_index - write_offset);
-    if (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN) {
-      break;
-    } else if (ret < 0) {
-      fprintf(stderr, "gnutls_record_send: %s\n", gnutls_strerror(ret));
-      client->protocol_state = PROTOCOL_SHUTDOWN;
-      break;
-    } else {
-      write_offset += ret;
+      if (protocol_ret == 0 && client->write_buf_index == 0)
+        return;
     }
-  }
 
-  memmove(client->write_buf, client->write_buf + write_offset, client->write_buf_index - write_offset);
-  client->write_buf_index -= write_offset;
+    assert(client->write_buf_index != 0);
+
+    write_offset = 0;
+    int eagain = 0;
+
+    while (write_offset != client->write_buf_index) {
+      ret = gnutls_record_send(client->session, client->write_buf + write_offset, client->write_buf_index - write_offset);
+      if (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN) {
+        eagain = 1;
+        break;
+      } else if (ret < 0) {
+        fprintf(stderr, "gnutls_record_send: %s\n", gnutls_strerror(ret));
+        client->protocol_state = PROTOCOL_SHUTDOWN;
+        break;
+      } else {
+        write_offset += ret;
+      }
+    }
+
+    memmove(client->write_buf, client->write_buf + write_offset, client->write_buf_index - write_offset);
+    client->write_buf_index -= write_offset;
+    if (eagain)
+      break;
+  }
 }
 
 void
@@ -351,7 +358,6 @@ main(void)
           if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
             break;
           esprintf(ret, "accept4");
-          fprintf(stderr, "accept4 %d\n", ret);
           client_fd = ret;
 
           new_client(epoll_fd, client_fd, priority, credentials, protocol);
