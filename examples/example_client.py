@@ -7,8 +7,8 @@ import sys
 
 #host = "ptpb.io"
 host = "localhost"
-port = 444
-http_port = 443
+port = 4444
+http_port = 4443
 #http_port = 8000
 
 ssl_context = ssl.create_default_context()

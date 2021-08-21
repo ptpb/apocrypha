@@ -738,7 +738,7 @@ http_write(void *const buf_head, size_t buf_size,
           if (context->method != METHOD_OPTIONS &&
               context->cors_mode != CORS_PREFLIGHT_COMPLETE)
             goto next_header;
-          [[fallthrough]];
+          __attribute__ ((fallthrough));
         case HEADER_ACCEPT_RANGES:
           if (_buf_length() < header_string.length + 2)
             goto handled_buf;
