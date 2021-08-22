@@ -402,7 +402,8 @@ main(void)
           ret = gnutls_bye(client->session, GNUTLS_SHUT_WR);
           if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED)
             continue;
-          enprintf(ret, "gnutls_bye: %s\n", gnutls_strerror(ret));
+          if (ret < 0)
+            fprintf(stderr, "gnutls_bye: %s\n", gnutls_strerror(ret));
           gnutls_deinit(client->session);
 
           ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
